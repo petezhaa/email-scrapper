@@ -1,0 +1,27 @@
+# Secrets — never commit
+.env
+
+# Personal data / generated output
+data/targets.csv
+data/profile_fields.json
+drafts/
+sent/
+resume/*.pdf
+resume/*.docx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+ResearchOutreach-data/
+
+# OS
+.DS_Store
+Thumbs.db
