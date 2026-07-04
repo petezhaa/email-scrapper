@@ -9,9 +9,11 @@ import { cn } from "@/lib/utils";
 export function ResumeUpload({
   initialName,
   initialOk,
+  kind = "academic",
 }: {
   initialName: string;
   initialOk: boolean;
+  kind?: "academic" | "industry";
 }) {
   const [current, setCurrent] = useState(initialOk ? initialName : null);
   const [uploading, setUploading] = useState(false);
@@ -25,7 +27,7 @@ export function ResumeUpload({
     }
     setUploading(true);
     try {
-      const r = await api.uploadResume(file);
+      const r = await api.uploadResume(file, kind);
       setCurrent(r.resume_name);
       setJustUploaded(true);
       setTimeout(() => setJustUploaded(false), 2000);

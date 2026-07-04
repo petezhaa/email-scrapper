@@ -11,6 +11,7 @@ const NAV = [
   { href: "/find", num: "02", label: "Find" },
   { href: "/contacts", num: "03", label: "Contacts" },
   { href: "/drafts", num: "04", label: "Drafts" },
+  { href: "/sent", num: "05", label: "Sent" },
 ];
 
 export function SiteHeader() {
@@ -18,7 +19,7 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-20 border-b border-border/80 bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/70">
       <div className="mx-auto flex w-full max-w-5xl items-stretch gap-8 px-6">
-        <Link href="/setup" className="flex items-center gap-3 py-3.5">
+        <Link href="/" className="flex items-center gap-3 py-3.5">
           <span className="grid size-8 place-items-center rounded-lg bg-primary text-primary-foreground">
             <Mail className="size-4" strokeWidth={1.75} />
           </span>

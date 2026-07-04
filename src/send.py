@@ -28,7 +28,8 @@ SMTP_PORT = 587
 def parse_draft(path: Path) -> dict:
     """Parse a draft .md with simple `---` front-matter into a dict + body."""
     text = path.read_text(encoding="utf-8")
-    meta: dict = {"to": "", "name": "", "subject": "", "status": "pending", "source_url": ""}
+    meta: dict = {"to": "", "name": "", "subject": "", "status": "pending",
+                  "source_url": "", "category": ""}
     body = text
     if text.startswith("---"):
         end = text.find("\n---", 3)
@@ -144,7 +145,17 @@ def send_approved(do_send: bool = False, log=print, html_map: dict | None = None
 
     drafts_dir = resolve(cfg["paths"]["drafts_dir"])
     sent_dir = resolve(cfg["paths"]["sent_dir"])
+    # The default/academic resume, plus an optional industry-specific one.
     resume = resolve(cfg["paths"]["resume"])
+    industry_path = cfg["paths"].get("resume_industry")
+    resume_industry = resolve(industry_path) if industry_path else None
+
+    def resume_for(draft: dict):
+        if (draft.get("category") == "industry" and resume_industry
+                and resume_industry.exists()):
+            return resume_industry
+        return resume
+
     sender = secrets["gmail_address"]
     sender_name = cfg["sender"]["name"]
     max_per_run = int(cfg["sending"]["max_per_run"])
@@ -196,7 +207,7 @@ def send_approved(do_send: bool = False, log=print, html_map: dict | None = None
 
             for i, d in enumerate(approved):
                 html = html_map.get(d["_file"].stem)
-                msg = _build_message(sender, sender_name, d, resume, fixed_sig, html=html)
+                msg = _build_message(sender, sender_name, d, resume_for(d), fixed_sig, html=html)
                 try:
                     server.send_message(msg)
                 except Exception as e:

@@ -219,6 +219,42 @@
   }
 }
 
+/* Content swap (e.g. Academia <-> Industry tabs): quick fade + tiny rise. */
+@keyframes fade-swap {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fade-swap {
+  animation: fade-swap 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+/* Lists/cards easing in once when their data arrives. */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fade-in {
+  animation: fade-in 0.35s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fade-swap,
+  .fade-in {
+    animation: none;
+  }
+}
+
 @keyframes theme-icon-in {
   from {
     opacity: 0;

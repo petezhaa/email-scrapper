@@ -1,9 +1,18 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, X, CheckCircle2, AlertTriangle } from "lucide-react";
+import Link from "next/link";
+import { Loader2, X, CheckCircle2, AlertTriangle, ArrowRight } from "lucide-react";
 import { api, type Job } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+// Where each finished job kind sends you.
+const KIND_LINK: Record<string, { href: string; label: string }> = {
+  scrape: { href: "/contacts", label: "View contacts" },
+  discover: { href: "/contacts", label: "View contacts" },
+  draft: { href: "/drafts", label: "View drafts" },
+  send: { href: "/drafts", label: "View drafts" },
+};
 
 // Fires when a pipeline job (scrape/discover/draft/send) finishes, so the
 // active page can refetch its data. Pages listen for "pipeline:done".
@@ -51,6 +60,7 @@ export function JobBar() {
   let content: React.ReactNode = null;
   let tone: "run" | "ok" | "err" = "run";
   let key = "";
+  let doneLink: { href: string; label: string } | null = null;
 
   if (running.length) {
     tone = "run";
@@ -84,6 +94,7 @@ export function JobBar() {
   } else if (recent && recent.status === "done") {
     tone = "ok";
     key = "done:" + recent.id;
+    doneLink = KIND_LINK[recent.kind] ?? null;
     content = (
       <>
         <CheckCircle2 className="size-4 shrink-0 text-[#8fd6a5]" />
@@ -106,6 +117,16 @@ export function JobBar() {
         )}
       >
         {content}
+        {tone === "ok" && doneLink && (
+          <Link
+            href={doneLink.href}
+            onClick={() => setDismissed(key)}
+            className="flex shrink-0 items-center gap-1 rounded-md bg-[#d97a4e] px-3 py-1.5 text-xs font-semibold text-[#16130d] transition-[filter] hover:brightness-105"
+          >
+            {doneLink.label}
+            <ArrowRight className="size-3.5" />
+          </Link>
+        )}
         {tone !== "run" && (
           <button
             aria-label="Dismiss"

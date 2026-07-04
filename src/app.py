@@ -1,13 +1,12 @@
-"""Local web UI for the research outreach emailer.
+"""Local JSON API for the research outreach emailer.
 
-Each user runs this on their own machine (`python run_app.py`), which opens a
-browser at http://127.0.0.1:5000. Their resume, Gmail credentials, and data
-stay local. The Anthropic API key is pre-set in .env by whoever shares the tool.
+Runs on http://127.0.0.1:5000 and backs the Next.js frontend (started together
+by `python run_web.py`), which proxies /py/* here. Everything stays on the
+user's machine; the Anthropic API key is pre-set in .env by whoever shares it.
 
-Flow in the UI:
-    Setup  → enter your info + schools, save, then "Scrape schools"
-    Contacts → review scraped professors, then "Generate drafts"
-    Drafts → edit + approve each email, then "Send approved"
+Endpoints live under /api/* — settings, contacts, drafts, and the background
+scrape / find / draft / send jobs. The pipeline itself is in scrape.py,
+schools.py, draft.py, and send.py (shared with the CLI in cli.py).
 """
 from __future__ import annotations
 
@@ -16,16 +15,14 @@ import json
 import threading
 import uuid
 
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
 from . import draft, scrape, send
-from .schools import discover_orgs
 from .config import (
     ROOT,
     PipelineError,
     bootstrap,
-    bundled_dir,
     has_anthropic_credential,
     load_config,
     load_secrets,
@@ -37,11 +34,8 @@ from .config import (
 # Make sure the data folders exist before anything reads config.
 bootstrap()
 
-app = Flask(
-    __name__,
-    template_folder=str(bundled_dir("templates")),
-    static_folder=str(bundled_dir("static")),
-)
+# Pure JSON API for the Next.js frontend (proxied at /py/*). No templates/static.
+app = Flask(__name__, static_folder=None)
 
 # In-memory job registry for long-running actions (scrape / draft / send).
 # Single local user, so a plain dict is fine.
@@ -93,35 +87,39 @@ def _load_profile_fields() -> dict:
     return {}
 
 
-def _save_resume(upload) -> str:
+def _save_resume(upload, kind: str = "academic") -> str:
     """Save an uploaded resume under its real filename and point config at it.
 
-    Keeps a single PDF in the resume folder and updates paths.resume so the
-    Setup page and the email attachment both use the actual file name.
-    Returns the stored filename.
+    kind="academic" is the default resume (paths.resume, also the fallback);
+    kind="industry" is an optional second resume attached to industry drafts
+    (paths.resume_industry, kept in a resume/industry subfolder so the two
+    don't clobber each other). Returns the stored filename.
     """
     cfg = load_config()
-    resume_dir = resolve(cfg["paths"]["resume"]).parent
-    resume_dir.mkdir(parents=True, exist_ok=True)
+    root_dir = resolve(cfg["paths"]["resume"]).parent
+    is_industry = kind == "industry"
+    target_dir = (root_dir / "industry") if is_industry else root_dir
+    key = "resume_industry" if is_industry else "resume"
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     safe = secure_filename(upload.filename or "") or "resume.pdf"
     if not safe.lower().endswith(".pdf"):
         safe += ".pdf"
 
-    # Only one resume lives in the folder — clear old PDFs before saving.
-    for old in resume_dir.glob("*.pdf"):
+    # Only one PDF lives in this slot's folder — clear it before saving.
+    for old in target_dir.glob("*.pdf"):
         try:
             old.unlink()
         except OSError:
             pass
 
-    dest = resume_dir / safe
+    dest = target_dir / safe
     upload.save(str(dest))
 
     try:
-        cfg["paths"]["resume"] = dest.relative_to(ROOT).as_posix()
+        cfg["paths"][key] = dest.relative_to(ROOT).as_posix()
     except ValueError:
-        cfg["paths"]["resume"] = f"{resume_dir.name}/{safe}"
+        cfg["paths"][key] = f"{target_dir.name}/{safe}"
     save_config(cfg)
     return safe
 
@@ -152,40 +150,6 @@ def _assemble_profile(fields: dict) -> str:
 
 
 # ───────────────────────────── routes ──────────────────────────────
-@app.route("/")
-def setup():
-    cfg = load_config()
-    secrets = load_secrets()
-    fields = _load_profile_fields()
-    urls_path = resolve(cfg["paths"]["directory_urls"])
-    schools = ""
-    if urls_path.exists():
-        schools = "\n".join(
-            ln for ln in urls_path.read_text(encoding="utf-8").splitlines()
-            if ln.strip() and not ln.strip().startswith("#")
-        )
-    resume_path = resolve(cfg["paths"]["resume"])
-    return render_template(
-        "setup.html",
-        active="setup",
-        fields=fields,
-        name=cfg["sender"]["name"],
-        phone=cfg["sender"].get("phone", ""),
-        gmail_address=secrets["gmail_address"],
-        gmail_app_password=secrets["gmail_app_password"],
-        schools=schools,
-        resume_ok=resume_path.exists(),
-        resume_name=resume_path.name,
-        respect_robots=bool(cfg.get("scraping", {}).get("respect_robots", True)),
-        verify_persons=bool(cfg.get("scraping", {}).get("verify_persons", False)),
-        filter_by_research=bool(cfg.get("scraping", {}).get("filter_by_research", False)),
-        web_research=bool(cfg.get("drafting", {}).get("web_research", True)),
-        quality_review=bool(cfg.get("drafting", {}).get("quality_review", True)),
-        api_key_ok=has_anthropic_credential(secrets),
-        saved=request.args.get("saved"),
-    )
-
-
 def _persist_settings(vals: dict) -> None:
     """Persist Setup / Find settings (profile.md, config.yaml, .env, schools file).
 
@@ -239,212 +203,6 @@ def _persist_settings(vals: dict) -> None:
         urls_path.write_text(header + cleaned + "\n", encoding="utf-8")
 
 
-@app.route("/settings", methods=["POST"])
-def save_settings():
-    f = request.form
-    _persist_settings(
-        {
-            "about": f.get("about", ""),
-            "experience": f.get("experience", ""),
-            "interests": f.get("interests", ""),
-            "writing_sample": f.get("writing_sample", ""),
-            "name": f.get("name", ""),
-            "phone": f.get("phone", ""),
-            "gmail_address": f.get("gmail_address", ""),
-            "gmail_app_password": f.get("gmail_app_password", ""),
-            "schools": f.get("schools", ""),
-            "verify_persons": bool(f.get("verify_persons")),
-            "filter_by_research": bool(f.get("filter_by_research")),
-            "web_research": bool(f.get("web_research")),
-            "quality_review": bool(f.get("quality_review")),
-        }
-    )
-
-    # Resume upload (optional)
-    upload = request.files.get("resume")
-    if upload and upload.filename:
-        _save_resume(upload)
-
-    return redirect(url_for("setup", saved=1))
-
-
-@app.route("/contacts")
-def contacts():
-    cfg = load_config()
-    targets_path = resolve(cfg["paths"]["targets"])
-    rows: list[dict] = []
-    if targets_path.exists():
-        with targets_path.open("r", encoding="utf-8", newline="") as fh:
-            rows = list(csv.DictReader(fh))
-    return render_template("contacts.html", active="contacts", rows=rows)
-
-
-@app.route("/contacts/set-email", methods=["POST"])
-def set_contact_email():
-    """Set the email for a no-email contact identified by its profile_url."""
-    cfg = load_config()
-    targets_path = resolve(cfg["paths"]["targets"])
-    profile_url = request.form.get("profile_url", "").strip()
-    new_email = request.form.get("email", "").strip().lower()
-    if targets_path.exists() and profile_url and new_email and "@" in new_email:
-        with _CSV_LOCK:
-            with targets_path.open("r", encoding="utf-8", newline="") as fh:
-                reader = csv.DictReader(fh)
-                fieldnames = reader.fieldnames or scrape.CSV_FIELDS
-                rows = list(reader)
-            for row in rows:
-                if (row.get("profile_url") or "").strip() == profile_url:
-                    row["email"] = new_email
-                    break
-            with targets_path.open("w", encoding="utf-8", newline="") as fh:
-                writer = csv.DictWriter(fh, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-    return redirect(url_for("contacts"))
-
-
-@app.route("/contacts/delete", methods=["POST"])
-def delete_contact():
-    cfg = load_config()
-    targets_path = resolve(cfg["paths"]["targets"])
-    email = request.form.get("email", "").strip().lower()
-    profile_url = request.form.get("profile_url", "").strip()
-    if targets_path.exists() and (email or profile_url):
-        def keep(r: dict) -> bool:
-            if email:
-                return (r.get("email") or "").strip().lower() != email
-            # Email-less contacts are identified by their profile URL instead.
-            return (r.get("profile_url") or "").strip() != profile_url
-
-        with _CSV_LOCK:
-            with targets_path.open("r", encoding="utf-8", newline="") as fh:
-                reader = csv.DictReader(fh)
-                fieldnames = reader.fieldnames or scrape.CSV_FIELDS
-                rows = [r for r in reader if keep(r)]
-            with targets_path.open("w", encoding="utf-8", newline="") as fh:
-                writer = csv.DictWriter(fh, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-    return redirect(url_for("contacts"))
-
-
-@app.route("/drafts")
-def drafts():
-    cfg = load_config()
-    drafts_dir = resolve(cfg["paths"]["drafts_dir"])
-    items: list[dict] = []
-    if drafts_dir.exists():
-        for d in send.load_drafts(drafts_dir):
-            items.append(
-                {
-                    "slug": d["_file"].stem,
-                    "to": d["to"],
-                    "name": d["name"],
-                    "subject": d["subject"],
-                    "status": d["status"],
-                    "source_url": d["source_url"],
-                    "body": d["body"],
-                }
-            )
-    counts: dict[str, int] = {}
-    for it in items:
-        counts[it["status"]] = counts.get(it["status"], 0) + 1
-    return render_template("drafts.html", active="drafts", items=items, counts=counts)
-
-
-@app.route("/drafts/save", methods=["POST"])
-def save_draft():
-    cfg = load_config()
-    drafts_dir = resolve(cfg["paths"]["drafts_dir"])
-    slug = request.form.get("slug", "")
-    path = drafts_dir / f"{slug}.md"
-    if path.exists() and path.parent == drafts_dir:
-        draft.write_draft_file(
-            path,
-            to=request.form.get("to", "").strip(),
-            name=request.form.get("name", "").strip(),
-            subject=request.form.get("subject", "").strip(),
-            body=request.form.get("body", ""),
-            source_url=request.form.get("source_url", "").strip(),
-            status=request.form.get("status", "pending").strip(),
-        )
-    return redirect(url_for("drafts"))
-
-
-@app.route("/reset/contacts", methods=["POST"])
-def reset_contacts():
-    p = resolve(load_config()["paths"]["targets"])
-    if p.exists():
-        p.unlink()
-    return redirect(url_for("setup", saved=1))
-
-
-@app.route("/reset/drafts", methods=["POST"])
-def reset_drafts():
-    d = resolve(load_config()["paths"]["drafts_dir"])
-    if d.exists():
-        for f in d.glob("*.md"):
-            f.unlink()
-    return redirect(url_for("setup", saved=1))
-
-
-@app.route("/drafts/delete", methods=["POST"])
-def delete_draft():
-    cfg = load_config()
-    drafts_dir = resolve(cfg["paths"]["drafts_dir"])
-    path = drafts_dir / f"{request.form.get('slug', '')}.md"
-    if path.exists() and path.parent == drafts_dir:
-        path.unlink()
-    return redirect(url_for("drafts"))
-
-
-# Long-running actions → background jobs. The browser starts them and moves on;
-# a persistent status bar polls /jobs, so drafting/sending keep running while you
-# navigate and review.
-@app.route("/run/scrape", methods=["POST"])
-def run_scrape():
-    return jsonify(job_id=_start_job(lambda log: scrape.run(log=log), "scrape", "Scraping"))
-
-
-@app.route("/run/discover", methods=["POST"])
-def run_discover():
-    query = (request.form.get("query") or "chemistry research scientist").strip()
-    cfg = load_config()
-    model = cfg["model"]["name"]
-
-    def _fn(log):
-        from .config import build_anthropic_client
-        client = build_anthropic_client()
-        urls = discover_orgs(query, client, model, log=log)
-        if not urls:
-            raise PipelineError(
-                f"No organizations found for '{query}'. Try a more specific search term."
-            )
-        log(f"Discovered {len(urls)} organization(s) — now scraping for contacts...")
-        return scrape.run(log=log, extra_urls=urls)
-
-    return jsonify(job_id=_start_job(_fn, "discover", f"Finding contacts: {query}"))
-
-
-@app.route("/run/draft", methods=["POST"])
-def run_draft():
-    def _draft_fn(log):
-        # Keep drafting while either kind of contact-finding job is still running.
-        return draft.run(
-            log=log,
-            keep_going=lambda: _job_running("scrape") or _job_running("discover"),
-        )
-    return jsonify(job_id=_start_job(_draft_fn, "draft", "Generating drafts"))
-
-
-@app.route("/run/send", methods=["POST"])
-def run_send():
-    return jsonify(
-        job_id=_start_job(lambda log: send.send_approved(do_send=True, log=log), "send", "Sending approved")
-    )
-
-
-@app.route("/job/<job_id>")
 def job_status(job_id: str):
     job = JOBS.get(job_id)
     if not job:
@@ -452,7 +210,6 @@ def job_status(job_id: str):
     return jsonify(status=job["status"], log=job["log"], error=job["error"], result=job["result"])
 
 
-@app.route("/jobs")
 def jobs_status():
     """Status of recent jobs for the persistent status bar (newest last)."""
     out = []
@@ -483,8 +240,6 @@ def jobs_status():
 
 # ═══════════════════════════════════════════════════════════════════════════
 # JSON API — consumed by the Next.js / shadcn frontend (proxied at /py/*).
-# The classic server-rendered routes above still work; these just return JSON
-# so the same pipeline backs both UIs.
 # ═══════════════════════════════════════════════════════════════════════════
 def _contacts_rows() -> list[dict]:
     cfg = load_config()
@@ -513,6 +268,8 @@ def api_state():
             if ln.strip() and not ln.strip().startswith("#")
         )
     resume_path = resolve(cfg["paths"]["resume"])
+    industry_path = cfg["paths"].get("resume_industry")
+    resume_industry = resolve(industry_path) if industry_path else None
     return jsonify(
         fields={
             "about": fields.get("about", ""),
@@ -527,6 +284,8 @@ def api_state():
         schools=schools,
         resume_ok=resume_path.exists(),
         resume_name=resume_path.name,
+        resume_industry_ok=bool(resume_industry and resume_industry.exists()),
+        resume_industry_name=resume_industry.name if resume_industry else "",
         verify_persons=bool(cfg.get("scraping", {}).get("verify_persons", False)),
         filter_by_research=bool(cfg.get("scraping", {}).get("filter_by_research", False)),
         web_research=bool(cfg.get("drafting", {}).get("web_research", True)),
@@ -547,13 +306,50 @@ def api_upload_resume():
     upload = request.files.get("resume")
     if not upload or not upload.filename:
         return jsonify(error="No file uploaded."), 400
-    name = _save_resume(upload)
+    kind = "industry" if (request.form.get("kind") == "industry") else "academic"
+    name = _save_resume(upload, kind=kind)
     return jsonify(ok=True, resume_name=name)
 
 
 @app.route("/api/contacts")
 def api_contacts():
-    return jsonify(rows=_contacts_rows())
+    cfg = load_config()
+    drafts_dir = resolve(cfg["paths"]["drafts_dir"])
+    rows = _contacts_rows()
+    # Flag which contacts already have a draft, so the UI can show it.
+    for r in rows:
+        slug = draft.slug_for(
+            r.get("email", ""), r.get("name", ""),
+            r.get("profile_url", ""), r.get("source_url", ""),
+        )
+        r["drafted"] = (drafts_dir / f"{slug}.md").exists()
+    return jsonify(rows=rows)
+
+
+@app.route("/api/sent")
+def api_sent():
+    cfg = load_config()
+    log_path = resolve(cfg["paths"]["sent_dir"]) / "sent_log.csv"
+    rows: list[dict] = []
+    if log_path.exists():
+        with log_path.open("r", encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+    rows.reverse()  # newest first
+    return jsonify(rows=rows)
+
+
+@app.route("/api/run/follow-up", methods=["POST"])
+def api_run_follow_up():
+    data = request.get_json(silent=True) or {}
+    to = (data.get("to") or "").strip()
+    name = (data.get("name") or "").strip()
+    subject = (data.get("subject") or "").strip()
+    if not to:
+        return jsonify(error="No recipient specified."), 400
+    return jsonify(
+        job_id=_start_job(lambda log: draft.follow_up(to, name, subject, log=log),
+                          "draft", f"Follow-up to {name or to}")
+    )
 
 
 @app.route("/api/contacts/set-email", methods=["POST"])
@@ -619,6 +415,7 @@ def api_drafts():
                 "subject": d["subject"],
                 "status": d["status"],
                 "source_url": d["source_url"],
+                "category": d.get("category", ""),
                 "body": d["body"],
             })
     counts: dict[str, int] = {}
@@ -635,6 +432,8 @@ def api_save_draft():
     slug = data.get("slug", "")
     path = drafts_dir / f"{slug}.md"
     if path.exists() and path.parent == drafts_dir:
+        # Preserve the draft's category (set at generation, not shown in the editor).
+        category = send.parse_draft(path).get("category", "")
         draft.write_draft_file(
             path,
             to=(data.get("to") or "").strip(),
@@ -643,6 +442,7 @@ def api_save_draft():
             body=data.get("body", ""),
             source_url=(data.get("source_url") or "").strip(),
             status=(data.get("status") or "pending").strip(),
+            category=category,
         )
         return jsonify(ok=True)
     return jsonify(error="Draft not found."), 404
@@ -749,6 +549,19 @@ def api_run_draft():
             keep_going=lambda: _job_running("scrape") or _job_running("discover"),
         )
     return jsonify(job_id=_start_job(_draft_fn, "draft", "Generating drafts"))
+
+
+@app.route("/api/run/draft-one", methods=["POST"])
+def api_run_draft_one():
+    data = request.get_json(silent=True) or {}
+    ident = (data.get("email") or data.get("profile_url") or data.get("name") or "").strip()
+    if not ident:
+        return jsonify(error="No contact specified."), 400
+    label = data.get("name") or ident
+    return jsonify(
+        job_id=_start_job(lambda log: draft.run(log=log, only=ident, limit=1),
+                          "draft", f"Drafting {label}")
+    )
 
 
 @app.route("/api/run/send", methods=["POST"])

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { ArrowRight, ExternalLink, Loader2, Search, Trash2 } from "lucide-react";
+import { ArrowRight, Check, ExternalLink, Loader2, PencilLine, Search, Trash2 } from "lucide-react";
 import { api, type Contact } from "@/lib/api";
 import { PIPELINE_DONE } from "@/components/job-bar";
 import { Button } from "@/components/ui/button";
@@ -72,6 +72,19 @@ export default function ContactsPage() {
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
       setDrafting(false);
+    }
+  }
+
+  async function draftOne(row: Contact) {
+    try {
+      await api.draftOne({
+        email: row.email || undefined,
+        profile_url: row.profile_url || undefined,
+        name: row.name || undefined,
+      });
+      toast.success(`Drafting an email for ${row.name || "this contact"} — check the Drafts tab.`);
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e));
     }
   }
 
@@ -176,7 +189,7 @@ export default function ContactsPage() {
             Generating never overwrites a draft you&rsquo;ve already edited.
           </p>
 
-          <Card className="overflow-hidden p-0">
+          <Card className="fade-in overflow-hidden p-0">
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
@@ -205,7 +218,18 @@ export default function ContactsPage() {
                         ) : (
                           <span>{row.name}</span>
                         )}
-                        <CategoryBadge category={row.category} />
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <CategoryBadge category={row.category} />
+                          {row.drafted && (
+                            <Badge
+                              variant="outline"
+                              className="w-fit gap-1 border-ok/30 bg-ok-soft font-normal text-ok"
+                            >
+                              <Check className="size-3" />
+                              drafted
+                            </Badge>
+                          )}
+                        </div>
                       </div>
                     </TableCell>
                     <TableCell className="align-top">
@@ -239,15 +263,27 @@ export default function ContactsPage() {
                       {row.research_interests}
                     </TableCell>
                     <TableCell className="align-top">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="size-8 text-muted-foreground hover:text-destructive"
-                        onClick={() => remove(row)}
-                        aria-label="Remove contact"
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
+                      <div className="flex items-center justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
+                          onClick={() => draftOne(row)}
+                          title={row.drafted ? "Regenerate the draft for this contact" : "Draft an email for this contact"}
+                        >
+                          <PencilLine className="size-3.5" />
+                          {row.drafted ? "Redraft" : "Draft"}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-8 text-muted-foreground hover:text-destructive"
+                          onClick={() => remove(row)}
+                          aria-label="Remove contact"
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}

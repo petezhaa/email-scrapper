@@ -12,6 +12,14 @@ export type Contact = {
   profile_url: string;
   source_url: string;
   category: ContactCategory;
+  drafted?: boolean;
+};
+
+export type SentEmail = {
+  sent_at_utc: string;
+  to: string;
+  name: string;
+  subject: string;
 };
 
 export type DraftStatus = "pending" | "approved" | "skip" | "sent";
@@ -40,6 +48,8 @@ export type SetupState = {
   schools: string;
   resume_ok: boolean;
   resume_name: string;
+  resume_industry_ok: boolean;
+  resume_industry_name: string;
   verify_persons: boolean;
   filter_by_research: boolean;
   web_research: boolean;
@@ -85,9 +95,10 @@ export const api = {
   getState: () => j<SetupState>("state"),
   saveSettings: (body: Partial<SetupState> & Record<string, unknown>) =>
     j<{ ok: true }>("settings", { method: "POST", body: JSON.stringify(body) }),
-  uploadResume: (file: File) => {
+  uploadResume: (file: File, kind: "academic" | "industry" = "academic") => {
     const fd = new FormData();
     fd.append("resume", file);
+    fd.append("kind", kind);
     // Let the browser set the multipart boundary; don't send JSON headers.
     return fetch("/py/resume", { method: "POST", body: fd }).then((r) => {
       if (!r.ok) throw new Error("Resume upload failed");
@@ -103,6 +114,10 @@ export const api = {
     }),
   deleteContact: (id: { email?: string; profile_url?: string }) =>
     j("contacts/delete", { method: "POST", body: JSON.stringify(id) }),
+
+  getSent: () => j<{ rows: SentEmail[] }>("sent"),
+  followUp: (c: { to: string; name?: string; subject?: string }) =>
+    j<{ job_id: string }>("run/follow-up", { method: "POST", body: JSON.stringify(c) }),
 
   getDrafts: () => j<{ items: Draft[]; counts: Record<string, number> }>("drafts"),
   saveDraft: (d: Omit<Draft, "status"> & { status: string }) =>
@@ -124,6 +139,11 @@ export const api = {
       body: JSON.stringify({ category }),
     }),
   runDraft: () => j<{ job_id: string }>("run/draft", { method: "POST" }),
+  draftOne: (c: { email?: string; profile_url?: string; name?: string }) =>
+    j<{ job_id: string }>("run/draft-one", {
+      method: "POST",
+      body: JSON.stringify(c),
+    }),
   // send is triggered through the Next route (renders React Email first)
   startSend: (html_map: Record<string, string>) =>
     j<{ job_id: string }>("run/send", {

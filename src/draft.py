@@ -60,48 +60,57 @@ DRAFT_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Shared voice rules — the difference between a reply and the trash. Injected into
+# every writer + reviewer prompt so drafts don't read as AI-generated.
+_HUMAN_VOICE = """
+
+SOUND LIKE A REAL PERSON, NOT AN AI — this matters more than anything else:
+- No throat-clearing opener. Banned first lines: "I hope this email finds you well", \
+"I am writing to", "I'm reaching out", "I recently came across", "I wanted to reach out". \
+Start on the actual substance.
+- Do not praise their work with adjectives ("impressive", "exciting", "fascinating", \
+"groundbreaking", "cutting-edge", "innovative", "compelling"). Name the specific thing plainly \
+and let it carry the weight.
+- No stock closers: "I look forward to hearing from you", "Thank you for your time and \
+consideration", "I would be grateful for the opportunity", "please don't hesitate". End plainly.
+- No AI connectives: "Furthermore", "Moreover", "Additionally", "In conclusion", "That said".
+- No buzzwords: leverage, align, synergy, robust, spearhead, passionate, delve, utilize, \
+facilitate, tapestry, testament, meticulous.
+- No "not just X, but Y" and no "it's not about X, it's about Y" constructions.
+- Vary sentence length; short sentences are good. Contractions are fine. A plain, direct, \
+even slightly blunt line reads more human than a polished one.
+- One concrete detail beats three sentences of praise. Specific over smooth.
+Write it the way a smart, busy person types a genuine two-minute email — not the way an \
+assistant writes one."""
+
 # ── Step 1: Claude researches the professor ────────────────────────────────────
 
 WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 2}
 
-WEB_RESEARCH_PROMPT = """You are helping a chemist write a targeted cold email to an \
-industry researcher for a full-time research scientist position. Search thoroughly and \
-build a research brief so the email opens with a specific, well-informed hook.
+WEB_RESEARCH_PROMPT = """You are helping the applicant (described in the profile) \
+write a short cold email about a specific job opening at a company. Search the web and \
+build a brief so the email opens on something concrete about the company or the role.
 
-Researcher: {name}
-Company / Affiliation: {affiliation}
-Known focus: {interests}
+Contact / company: {name}
+Company: {affiliation}
+What the posting says: {interests}
 
-Do the following searches:
-1. Search "{name} {affiliation} research" to find their recent publications or work.
-2. Search "{name} {affiliation}" to find their LinkedIn, company bio, or lab page.
-3. Search "{affiliation} research pipeline" or "{affiliation} research focus" to understand \
-what the company's research team is working on.
+Do these searches:
+1. Search "{affiliation}" and its careers / team pages to see what the company does.
+2. Search "{affiliation} product OR platform OR pipeline OR research" to find what it is \
+known for.
+3. If a contact person is named, search "{name} {affiliation}" for their role/bio.
 
-The applicant's techniques: NMR spectroscopy (multinuclear, PRE, multiple-quantum filtration), \
-AFM-IR (Nano-IR), XL-MS, FRET, solution biophysics. When choosing a hook, prefer work that \
-connects to these specific methods.
+Return a plain-text brief with:
 
-Return a plain-text brief with ALL of the following (if findable):
+BEST HOOK: The most specific, concrete thing the applicant can connect to — a product, \
+platform, pipeline area, or the core responsibility of this role. One or two sentences on \
+what it is. This is the most important field.
 
-BEST HOOK: The most specific connection between this person's/company's research and the \
-applicant's background. Could be a published paper, a patent, a known product/platform, or \
-a specific research focus the company is known for. Format: "[Year if applicable] [source] — \
-[1-2 sentences on what it is and exactly why the applicant's techniques are relevant]." \
-This is the most important field.
+COMPANY CONTEXT: 1-2 sentences on what the company does and where this role fits.
 
-SECOND HOOK: A second specific angle if one exists (different technique or project). \
-Leave blank if nothing fits well — do not force it.
-
-CURRENT RESEARCH FOCUS: 2-3 sentences on what this team/person is actively working on \
-now — the problems, model systems, and specific techniques they use.
-
-COMPANY CONTEXT: What the company does, its pipeline/products, and where research fits \
-in their work.
-
-Be accurate and specific. Only include things you actually found via search. \
-If you cannot confidently identify this person's research, reply with exactly: \
-NO_RELIABLE_INFO"""
+Be accurate and specific — only include what you actually found via search. If you cannot \
+confidently identify the company or role, reply with exactly: NO_RELIABLE_INFO"""
 
 
 def _web_research(client, model: str, name: str, affiliation: str, interests: str, log,
@@ -134,87 +143,55 @@ def _web_research(client, model: str, name: str, affiliation: str, interests: st
 
 # ── Step 2: GPT writes the email ──────────────────────────────────────────────
 
-WRITER_SYSTEM_PROMPT = """You are writing a cold outreach email on behalf of Dennis Rui \
-for a full-time research scientist position. Your only job is to write the hook — one \
-paragraph that connects Dennis's real techniques to something specific about the recipient's \
-work. The rest of the email follows a fixed template; a reviewer will enforce it.
+WRITER_SYSTEM_PROMPT = """You are writing a short, sincere cold email on behalf of the \
+applicant described in the profile, expressing interest in a specific job opening at a \
+company. Write the COMPLETE email.
 
-WHAT MAKES THE HOOK WORK:
-Industry researchers delete generic emails immediately. This one survives because Dennis \
-knows their specific work. Name something concrete (a paper, patent, product, or platform), \
-say one precise thing about what it does or found, then connect it directly to a technique \
-Dennis has actually used. The connection must feel inevitable — like he is the natural \
-person for this team. One specific sentence beats three vague ones.
+WHY IT WORKS: Recruiters and hiring managers skim. This one earns a reply because it names \
+the specific role and one concrete thing about the company, then connects that to the \
+applicant's real, relevant experience. Specific and honest beats generic enthusiasm.
 
-THE HOOK MUST:
-- Name the specific paper/platform/pipeline (not "your drug discovery work")
-- Say what it found or does — one concrete detail, not the topic area
-- Connect to a real technique Dennis has used with his hands
-- Be 2-4 sentences maximum
-
-DENNIS'S TECHNIQUES (use these for the bridge):
-- Multinuclear NMR, NMR-PRE, multiple-quantum filtration (ion binding, chaperone contacts)
-- AFM-IR / Nano-IR (nanoscale chemical imaging)
-- XL-MS (protein complex mapping)
-- FRET (conformational dynamics)
-- Python scripting, ORCA simulations for spectroscopic data
-
-FIXED EMAIL STRUCTURE — write to fill this exactly:
----
-Hi [First],
-
-My name is Dennis Rui, and I am a recent Chemistry BA/MS graduate from Northwestern \
-University. [HOOK PARAGRAPH — this is what you write]
-
-My background in research encompasses:
-
--  Wet-Lab: Experience synthesizing biomaterials and utilizing FPLC-based protein \
-purification workflows.
-
--  Spectroscopy: Probing transient and non-equilibrium states using multi-nuclei, \
-multi-phase NMR, AFM-IR, and FRET.
-
--  Computational Modeling: Building custom Python scripts and running high-performance \
-simulations (e.g., ORCA) to process and analyze heavy spectroscopic data.
-
-I would be grateful for the opportunity to learn more about any potential opportunities. \
-My CV is attached below and thank you for your time!
-
-Best,
-
-Dennis
----
+THE EMAIL MUST:
+- Greet the contact by first name if one is given ("Hi [First],"); if the recipient is a \
+  company or team rather than a named person, open with "Hello,".
+- In the first 1-2 sentences, name the specific role and one concrete detail about the \
+  company or role (from the brief) — not "your company" or "your work".
+- Give 2-3 sentences on the applicant's most relevant REAL experience, drawn only from the \
+  profile and resume. Never invent experience, skills, or credentials.
+- Close by expressing interest in the role and asking about next steps; note that a CV is \
+  attached.
+- Be under ~180 words. Plain, direct, professional — scientist/professional to \
+  professional, not a nervous student.
 
 VOICE:
-- Write the hook like a scientist talking to another scientist, not a student applying.
 - Short sentences land harder than long ones.
-- Warmth comes from specificity, not adjectives. Never say "fascinating" or "exciting."
-- Dennis is offering value, not asking for a favor. Write from that posture.
+- Warmth comes from specificity, not adjectives. No clichés: "passionate", "excited", \
+  "fascinated", "align", "leverage", "synergy", "robust", "novel", "pioneering".
+- The applicant is offering value, not begging. Write from that posture.
 
-Only use facts from the inputs. Return JSON: {"subject": "...", "body": "..."} \
-where body is the COMPLETE email (greeting through sign-off), with [HOOK PARAGRAPH] \
-replaced by the actual hook you wrote."""
+Only use facts from the inputs. Return JSON: {"subject": "...", "body": "..."} where body \
+is the COMPLETE email (greeting through sign-off), signed with the sender's name.""" + _HUMAN_VOICE
 
 WRITER_USER_PROMPT = """Applicant profile:
 <profile>
 {profile}
 </profile>
 {resume_section}
-Recipient:
-- Name: {name}
-- Title: {title}
-- Company / Affiliation: {affiliation}
-- Research focus: {research_interests}
+The opening:
+- Role / title: {title}
+- Company: {affiliation}
+- What the posting says: {research_interests}
+- Contact: {name}
 
 {page_section}
 
-Research brief from web search (build the hook from BEST HOOK; cite only what is listed here):
+Web research brief (open on BEST HOOK; cite only what is listed here):
 <research_brief>
 {research_brief}
 </research_brief>
 
-Write the email. Greet as: "Hi {first_name}," (always first name — industry culture).
-Sign off as: {sender_name}
+Write the email about this specific role. Greet as "Hi {first_name}," if "{name}" is a \
+person; if "{name}" is a company or team, open with "Hello,". Sign off as {sender_name}.
 Return JSON: {{"subject": "...", "body": "..."}}"""
 
 
@@ -265,55 +242,25 @@ def _write_email(
 
 # ── Step 3: Gemini reviews the email ──────────────────────────────────────────
 
-REVIEWER_PROMPT = """You edit cold outreach emails written by Dennis Rui for industry \
-research scientist positions. Fix every rule violation and return ONLY the corrected \
-email body — no explanation, no preamble, no markdown.
-
-FIXED TEMPLATE (the email must follow this structure exactly — only the hook changes):
-
-Hi [First],
-
-My name is Dennis Rui, and I am a recent Chemistry BA/MS graduate from Northwestern \
-University. [Hook paragraph]
-
-My background in research encompasses:
-
--  Wet-Lab: Experience synthesizing biomaterials and utilizing FPLC-based protein \
-purification workflows.
-
--  Spectroscopy: Probing transient and non-equilibrium states using multi-nuclei, \
-multi-phase NMR, AFM-IR, and FRET.
-
--  Computational Modeling: Building custom Python scripts and running high-performance \
-simulations (e.g., ORCA) to process and analyze heavy spectroscopic data.
-
-I would be grateful for the opportunity to learn more about any potential opportunities. \
-My CV is attached below and thank you for your time!
-
-Best,
-
-Dennis
-
----
+REVIEWER_PROMPT = """You edit short cold emails expressing interest in a specific job \
+opening. Fix every rule violation and return ONLY the corrected email body — no \
+explanation, no preamble, no markdown.
 
 RULES (fix every failure):
-1. Greeting: "Hi [First name]," — never "Dear", never "Hi Professor", never full name.
-2. P1 intro sentence must be word-for-word: "My name is Dennis Rui, and I am a recent \
-Chemistry BA/MS graduate from Northwestern University." Do not paraphrase it.
-3. Hook paragraph: must name something specific (a paper, patent, product, or platform) \
-and what it does or found. "Your work in drug discovery" is a FAIL. Must connect to a \
-real technique Dennis has used (NMR, AFM-IR, XL-MS, FRET, Python/ORCA).
-4. Background block: must match the template exactly — 3 bullets (Wet-Lab, Spectroscopy, \
-Computational Modeling) with the exact text above. Do not shorten, reorder, or rephrase.
-5. Closing sentence must be word-for-word: "I would be grateful for the opportunity to \
-learn more about any potential opportunities. My CV is attached below and thank you for \
-your time!"
-6. Sign-off: "Best," blank line, "Dennis" — nothing else.
-7. No em dashes anywhere. No links or contact info in the body.
-8. No academic jargon: no "principal investigator", no "PI", no "post-bacc", no "PhD programs."
-9. No filler: "passionate about", "fascinated by", "excited to", "would love the opportunity", \
-"iterating", "leveraging", "synergy", "robust", "novel", "pioneering", "groundbreaking", \
-"align", "spearheading."
+1. Greeting: "Hi [First]," if a person is named; "Hello," if it's addressed to a company \
+   or team. Never "Dear Professor", never a full name.
+2. The opening must name the SPECIFIC role and one concrete detail about the company or \
+   role. "Your company" or "your work" is a FAIL.
+3. It must connect that to the applicant's real experience. Invent nothing — no skills, \
+   techniques, or credentials that aren't in the email already.
+4. Under ~180 words. Must end by expressing interest in the role and asking about next \
+   steps, and mention the attached CV.
+5. No em dashes anywhere. No links or contact info in the body.
+6. No filler / clichés: "passionate about", "fascinated by", "excited to", "would love \
+   the opportunity", "leveraging", "synergy", "robust", "novel", "pioneering", \
+   "groundbreaking", "align", "spearheading".
+7. Keep it signed with the sender's name already in the email; do not change the name.
+""" + _HUMAN_VOICE + """
 
 EMAIL TO FIX:
 ---
@@ -378,6 +325,15 @@ def _slug(email: str) -> str:
     return re.sub(r"[^a-z0-9._-]+", "_", email.strip().lower())
 
 
+def slug_for(email: str = "", name: str = "", profile_url: str = "", source_url: str = "") -> str:
+    """The draft filename stem for a contact — same precedence used by run()."""
+    if email.strip():
+        return _slug(email)
+    if name.strip():
+        return _slug(name)
+    return _slug(profile_url.strip() or source_url.strip() or "unknown")
+
+
 def _no_dashes(text: str) -> str:
     """Remove em/en dashes (and '--') the model may slip in, tidying spacing."""
     text = text.replace("—", ", ").replace("–", ", ").replace("--", ", ")
@@ -406,6 +362,7 @@ def write_draft_file(
     body: str,
     source_url: str,
     status: str = "pending",
+    category: str = "",
 ) -> None:
     """Write a draft as Markdown with simple front-matter."""
     front = (
@@ -415,6 +372,7 @@ def write_draft_file(
         f"subject: {json.dumps(subject)}\n"
         f"status: {json.dumps(status)}   # pending | approved | skip | sent\n"
         f"source_url: {json.dumps(source_url)}\n"
+        f"category: {json.dumps(category)}\n"
         "---\n\n"
     )
     path.write_text(front + body.strip() + "\n", encoding="utf-8")
@@ -470,7 +428,7 @@ THE EMAIL MUST:
   "novel", "groundbreaking"). No em dashes. No links in the body.
 
 Only use facts from the inputs. Return JSON: {"subject": "...", "body": "..."} where \
-body is the complete email (greeting through sign-off), signed with the sender's name."""
+body is the complete email (greeting through sign-off), signed with the sender's name.""" + _HUMAN_VOICE
 
 ACADEMIC_WRITER_USER_PROMPT = """Applicant profile:
 <profile>
@@ -508,6 +466,7 @@ RULES (fix every failure):
 5. No clichés: "passionate", "fascinated", "excited", "align", "leverage", "synergy", \
    "robust", "novel", "pioneering", "groundbreaking". No em dashes. No links in the body.
 6. Keep it signed with the sender's name; do not add contact details.
+""" + _HUMAN_VOICE + """
 
 EMAIL TO FIX:
 ---
@@ -517,12 +476,16 @@ EMAIL TO FIX:
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def run(limit: int | None = None, log=print, keep_going=None) -> dict:
+def run(limit: int | None = None, log=print, keep_going=None,
+        only: str | None = None) -> dict:
     """Generate drafts for all contacts that don't have one yet.
 
     keep_going: optional callable that returns True while scraping is still
     running. When provided the drafter loops, re-reading the CSV for new
     contacts every 15 seconds, until keep_going() returns False.
+
+    only: an identifier (email, name, or profile_url) — draft just that one
+    contact, regenerating even if a draft already exists ("Draft this" action).
     """
     import time as _time
 
@@ -577,14 +540,14 @@ def run(limit: int | None = None, log=print, keep_going=None) -> dict:
         for t in targets:
             email = (t.get("email") or "").strip()
             name = t.get("name", "").strip()
-            if email:
-                slug = _slug(email)
-            elif name:
-                slug = _slug(name)
-            else:
-                slug = _slug(t.get("profile_url", "") or t.get("source_url", "unknown"))
+            profile_url = (t.get("profile_url") or "").strip()
+            if only and only not in (email, name, profile_url):
+                continue
+            slug = slug_for(email, name, profile_url, t.get("source_url", ""))
             draft_path = drafts_dir / f"{slug}.md"
-            if draft_path.exists():
+            # In normal mode skip contacts that already have a draft; in "only"
+            # mode the user explicitly asked to (re)draft this one.
+            if draft_path.exists() and not only:
                 continue
             if limit is not None and made >= limit:
                 break
@@ -637,12 +600,15 @@ def run(limit: int | None = None, log=print, keep_going=None) -> dict:
                 subject=subject,
                 body=body,
                 source_url=t.get("source_url", ""),
+                category=category,
             )
             made += 1
             made_this_pass += 1
             log(f"  [{name}] done — subject: {subject}")
+            if only:
+                break  # single-contact "Draft this" — one and done
 
-        if keep_going is None:
+        if only or keep_going is None:
             break
         if keep_going():
             if made_this_pass == 0:
@@ -653,3 +619,62 @@ def run(limit: int | None = None, log=print, keep_going=None) -> dict:
 
     log(f"Done. Wrote {made} new draft(s).")
     return {"made": made}
+
+
+# ── Follow-ups (for the Sent view) ─────────────────────────────────────────────
+
+FOLLOWUP_SYSTEM_PROMPT = """You are writing a very short, polite follow-up to a cold \
+email that got no reply. 2 to 4 sentences, total. Briefly reference the earlier email, \
+restate interest in one line, and make a small, low-pressure ask. No guilt, no "just \
+checking in" filler, no re-pitching the whole thing. Warm and brief.
+
+Return JSON: {"subject": "...", "body": "..."} where body is the complete email \
+(greeting through sign-off), signed with the sender's name.""" + _HUMAN_VOICE
+
+FOLLOWUP_USER_PROMPT = """The applicant (below) emailed {name} about "{subject}" a while \
+ago and hasn't heard back. Write a brief, friendly follow-up.
+
+Applicant profile:
+<profile>
+{profile}
+</profile>
+
+Greet by first name if "{name}" is a person, otherwise open with "Hello,". Keep the \
+subject as "Re: {subject}" unless a shorter one clearly fits. Sign off as {sender_name}.
+Return JSON: {{"subject": "...", "body": "..."}}"""
+
+
+def follow_up(to: str, name: str, subject: str, log=print) -> dict:
+    """Write a short follow-up draft for a previously-sent email. Saved as a new
+    pending draft (slug + '_followup') for review."""
+    cfg = load_config()
+    writer_client = build_writer_client()
+    profile = resolve(cfg["paths"]["profile"]).read_text(encoding="utf-8")
+    sender_name = cfg["sender"]["name"]
+    if not sender_name.strip():
+        raise PipelineError("Sender name is not set. Fill in your name on the Setup page and save.")
+    drafts_dir = resolve(cfg["paths"]["drafts_dir"])
+    drafts_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt = FOLLOWUP_USER_PROMPT.format(
+        name=name or "(unknown)", subject=subject or "(no subject)",
+        profile=profile, sender_name=sender_name,
+    )
+    log(f"  [{name}] writing follow-up…")
+    resp = writer_client.chat.completions.create(
+        model=cfg["model"].get("writer", "openai/gpt-4o"),
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": FOLLOWUP_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    data = json.loads(resp.choices[0].message.content or "{}")
+    subj = _no_dashes(data.get("subject") or f"Re: {subject}")
+    body = _no_dashes((data.get("body") or "").strip())
+
+    slug = slug_for(to, name) + "_followup"
+    write_draft_file(drafts_dir / f"{slug}.md", to=to, name=name, subject=subj,
+                     body=body, source_url="", status="pending")
+    log(f"  [{name}] follow-up drafted — subject: {subj}")
+    return {"made": 1, "slug": slug}

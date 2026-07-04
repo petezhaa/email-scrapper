@@ -39,6 +39,8 @@ const EMPTY: SetupState = {
   schools: "",
   resume_ok: false,
   resume_name: "",
+  resume_industry_ok: false,
+  resume_industry_name: "",
   verify_persons: false,
   filter_by_research: false,
   web_research: true,
@@ -158,6 +160,11 @@ export default function SetupPage() {
                 placeholder="Jane Doe"
                 onChange={(e) => set({ name: e.target.value })}
               />
+              {!st.name.trim() && (
+                <p className="text-[12px] text-warn">
+                  Required — drafting and sending won&rsquo;t run without it.
+                </p>
+              )}
             </Field>
             <Field label="Phone (shown in your sign-off)">
               <Input
@@ -249,8 +256,33 @@ export default function SetupPage() {
           <p className="eyebrow">Resume</p>
           <CardTitle className="sr-only">Resume</CardTitle>
         </CardHeader>
-        <CardContent>
-          <ResumeUpload initialName={st.resume_name} initialOk={st.resume_ok} />
+        <CardContent className="space-y-5">
+          <div className="space-y-2">
+            <Label className="text-[13px] font-medium">
+              Academic CV{" "}
+              <span className="font-normal text-muted-foreground">
+                — attached to academic emails (and the default)
+              </span>
+            </Label>
+            <ResumeUpload
+              initialName={st.resume_name}
+              initialOk={st.resume_ok}
+              kind="academic"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label className="text-[13px] font-medium">
+              Industry résumé{" "}
+              <span className="font-normal text-muted-foreground">
+                — optional; attached to industry emails. Falls back to your CV.
+              </span>
+            </Label>
+            <ResumeUpload
+              initialName={st.resume_industry_name}
+              initialOk={st.resume_industry_ok}
+              kind="industry"
+            />
+          </div>
         </CardContent>
       </Card>
 

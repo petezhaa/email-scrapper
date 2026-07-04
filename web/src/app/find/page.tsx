@@ -169,7 +169,7 @@ export default function FindPage() {
           })}
         </TabsList>
 
-        <Card>
+        <Card key={tab} className="fade-swap">
           <CardHeader>
             <p className="eyebrow flex items-center gap-1.5">
               <Icon className="size-3.5" />
