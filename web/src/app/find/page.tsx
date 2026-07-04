@@ -73,6 +73,7 @@ export default function FindPage() {
   const [schools, setSchools] = useState("");
   const [filterByResearch, setFilterByResearch] = useState(false);
   const [verifyPersons, setVerifyPersons] = useState(false);
+  const [findEmails, setFindEmails] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState<"discover" | "scrape" | null>(null);
 
@@ -106,7 +107,7 @@ export default function FindPage() {
     setBusy("discover");
     try {
       await saveOpts();
-      await api.runDiscover(query.trim(), tab);
+      await api.runDiscover(query.trim(), tab, tab === "research" && findEmails);
       toast.success(
         "Searching — new contacts are added to Contacts. Search again to add more.",
       );
@@ -269,6 +270,14 @@ export default function FindPage() {
             title="AI-verify each person is an individual"
             hint="Skips lab or team pages that aren't a single person."
           />
+          {tab === "research" && (
+            <Opt
+              checked={findEmails}
+              onChange={setFindEmails}
+              title="Find missing emails"
+              hint="Academic directories rarely list emails. This looks each person up (web search + mail-server check) to fill them in. Much slower, but you can actually send."
+            />
+          )}
         </CardContent>
       </Card>
     </div>

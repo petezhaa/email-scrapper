@@ -104,11 +104,13 @@ If you cannot confidently identify this person's research, reply with exactly: \
 NO_RELIABLE_INFO"""
 
 
-def _web_research(client, model: str, name: str, affiliation: str, interests: str, log) -> str:
-    """Claude: web-search the professor and return a plain-text research brief (or '')."""
+def _web_research(client, model: str, name: str, affiliation: str, interests: str, log,
+                  category: str = "research") -> str:
+    """Claude: web-search the recipient and return a plain-text research brief (or '')."""
     if not name:
         return ""
-    prompt = WEB_RESEARCH_PROMPT.format(
+    template = WEB_RESEARCH_PROMPT if category == "industry" else ACADEMIC_WEB_RESEARCH_PROMPT
+    prompt = template.format(
         name=name, affiliation=affiliation or "(unknown)", interests=interests or "(none listed)"
     )
     messages = [{"role": "user", "content": prompt}]
@@ -229,9 +231,10 @@ def _write_email(
     research_brief: str,
     sender_name: str,
     log,
+    category: str = "research",
 ) -> dict:
     """GPT: write the email from the research brief. Returns {subject, body}."""
-    prompt = WRITER_USER_PROMPT.format(
+    common = dict(
         profile=profile,
         resume_section=resume_section,
         name=name or "(unknown)",
@@ -240,14 +243,19 @@ def _write_email(
         research_interests=interests or "(none listed)",
         page_section=page_section,
         research_brief=research_brief or "(no web research available — use directory interests only)",
-        first_name=_first_name(name) or "(name)",
         sender_name=sender_name,
     )
+    if category == "industry":
+        system = WRITER_SYSTEM_PROMPT
+        prompt = WRITER_USER_PROMPT.format(first_name=_first_name(name) or "(name)", **common)
+    else:
+        system = ACADEMIC_WRITER_SYSTEM_PROMPT
+        prompt = ACADEMIC_WRITER_USER_PROMPT.format(last_name=_last_name(name) or "(name)", **common)
     resp = oai_client.chat.completions.create(
         model=model,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": WRITER_SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
     )
@@ -313,12 +321,14 @@ EMAIL TO FIX:
 ---"""
 
 
-def _review_email(oai_client, model: str, body: str, log, name: str = "") -> str:
+def _review_email(oai_client, model: str, body: str, log, name: str = "",
+                  category: str = "research") -> str:
     """Gemini: review the email body and return the fixed version."""
+    template = REVIEWER_PROMPT if category == "industry" else ACADEMIC_REVIEWER_PROMPT
     try:
         resp = oai_client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": REVIEWER_PROMPT.format(body=body)}],
+            messages=[{"role": "user", "content": template.format(body=body)}],
         )
         fixed = (resp.choices[0].message.content or "").strip()
         return fixed if fixed else body
@@ -410,6 +420,101 @@ def write_draft_file(
     path.write_text(front + body.strip() + "\n", encoding="utf-8")
 
 
+# ── Academic variant (category == "research") ──────────────────────────────────
+# Professors aren't hiring for a company role — this is a student/researcher
+# inquiring about a spot in their lab, opening on a specific recent paper.
+
+ACADEMIC_WEB_RESEARCH_PROMPT = """You are helping someone write a targeted cold \
+email to a professor to ask about research opportunities in their lab. Search the \
+web and build a brief so the email can open on a specific, recent piece of the \
+professor's work.
+
+Professor: {name}
+Affiliation: {affiliation}
+Known focus: {interests}
+
+Do these searches:
+1. "{name} {affiliation}" — their faculty/lab page and Google Scholar profile.
+2. "{name} {affiliation} 2024 OR 2025" — a recent, specific publication or project.
+3. Their lab website for what they are currently working on.
+
+Return a plain-text brief with:
+BEST HOOK: The most specific recent paper or project — "[year] [title or one-line \
+description] — [one concrete finding or method]". This is what the email opens on. \
+The most important field.
+CURRENT FOCUS: 2-3 sentences on what the lab is actively working on now.
+
+Only include things you actually found via search. If you cannot confidently \
+identify this professor's work, reply with exactly: NO_RELIABLE_INFO"""
+
+ACADEMIC_WRITER_SYSTEM_PROMPT = """You are writing a short, sincere cold email on \
+behalf of the applicant described in the profile, to a professor, asking about \
+research opportunities in their lab. Write the COMPLETE email.
+
+WHY IT WORKS: Professors delete generic email. This one earns a reply because it \
+opens on something specific and recent from their own work, then connects it \
+honestly to the applicant's real interests and experience. Specific and honest \
+beats flattering and vague.
+
+THE EMAIL MUST:
+- Address them as "Dear Professor {last_name}," (use "Dear Dr. {last_name}," only if \
+  their title clearly isn't professor).
+- Open (1-2 sentences) on the specific recent paper/project from the brief, with one \
+  concrete detail, and why it connects to the applicant's genuine interests.
+- Give 2-3 sentences on the applicant's most relevant REAL experience, drawn only \
+  from the profile and resume — never invent anything.
+- Close by asking whether they are taking on students/researchers and offering to \
+  share more; note that a CV is attached.
+- Be under ~180 words. Plain, direct, scientist-to-scientist.
+- No clichés ("passionate", "fascinated", "excited", "align", "leverage", "robust", \
+  "novel", "groundbreaking"). No em dashes. No links in the body.
+
+Only use facts from the inputs. Return JSON: {"subject": "...", "body": "..."} where \
+body is the complete email (greeting through sign-off), signed with the sender's name."""
+
+ACADEMIC_WRITER_USER_PROMPT = """Applicant profile:
+<profile>
+{profile}
+</profile>
+{resume_section}
+Recipient (a professor):
+- Name: {name}
+- Title: {title}
+- Affiliation: {affiliation}
+- Research focus: {research_interests}
+
+{page_section}
+
+Research brief from web search (open on BEST HOOK; cite only what is listed here):
+<research_brief>
+{research_brief}
+</research_brief>
+
+Write the email. Address them as "Dear Professor {last_name}," and sign off as \
+{sender_name}. Return JSON: {{"subject": "...", "body": "..."}}"""
+
+ACADEMIC_REVIEWER_PROMPT = """You edit cold research-inquiry emails written to \
+professors. Fix every rule violation and return ONLY the corrected email body — no \
+explanation, no preamble, no markdown.
+
+RULES (fix every failure):
+1. Greeting: "Dear Professor [Last]," or "Dear Dr. [Last]," — never "Hi", never a \
+   first name, never a full name.
+2. The opening must name a SPECIFIC recent paper or project of the professor and one \
+   concrete detail. "Your work on X" or "your research in the field" is a FAIL.
+3. It must connect that work to the applicant's real interests/experience. Invent nothing.
+4. Under ~180 words. Must end with a clear ask about research opportunities and mention \
+   the attached CV.
+5. No clichés: "passionate", "fascinated", "excited", "align", "leverage", "synergy", \
+   "robust", "novel", "pioneering", "groundbreaking". No em dashes. No links in the body.
+6. Keep it signed with the sender's name; do not add contact details.
+
+EMAIL TO FIX:
+---
+{body}
+---"""
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def run(limit: int | None = None, log=print, keep_going=None) -> dict:
@@ -487,13 +592,15 @@ def run(limit: int | None = None, log=print, keep_going=None) -> dict:
             affiliation = t.get("affiliation", "").strip()
             interests = t.get("research_interests", "").strip()
             title = t.get("title", "").strip()
+            category = (t.get("category") or "research").strip() or "research"
 
             # Step 1: Claude researches
             research_brief = ""
             if web_research:
                 log(f"  [{name}] researching…")
                 research_brief = _web_research(
-                    claude_client, claude_model, name, affiliation, interests, log
+                    claude_client, claude_model, name, affiliation, interests, log,
+                    category=category,
                 )
 
             # Step 2: GPT writes
@@ -507,7 +614,7 @@ def run(limit: int | None = None, log=print, keep_going=None) -> dict:
                     writer_client, writer_model,
                     name, title, affiliation, interests,
                     profile, resume_section, page_section, research_brief,
-                    sender_name, log,
+                    sender_name, log, category=category,
                 )
             except Exception as e:
                 log(f"  [{name}] write failed: {e}")
@@ -519,7 +626,8 @@ def run(limit: int | None = None, log=print, keep_going=None) -> dict:
             # Step 3: Gemini reviews (optional — controlled by quality_review toggle)
             if quality_review:
                 log(f"  [{name}] reviewing…")
-                body = _review_email(reviewer_client, reviewer_model, body, log, name=name)
+                body = _review_email(reviewer_client, reviewer_model, body, log,
+                                     name=name, category=category)
             body = _no_dashes(body)
 
             write_draft_file(

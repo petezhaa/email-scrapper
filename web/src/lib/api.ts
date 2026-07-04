@@ -113,10 +113,10 @@ export const api = {
   resetContacts: () => j("reset/contacts", { method: "POST" }),
   resetDrafts: () => j("reset/drafts", { method: "POST" }),
 
-  runDiscover: (query: string, category: ContactCategory) =>
+  runDiscover: (query: string, category: ContactCategory, findEmails = false) =>
     j<{ job_id: string }>("run/discover", {
       method: "POST",
-      body: JSON.stringify({ query, category }),
+      body: JSON.stringify({ query, category, find_emails: findEmails }),
     }),
   runScrape: (category: ContactCategory) =>
     j<{ job_id: string }>("run/scrape", {

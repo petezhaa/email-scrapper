@@ -699,6 +699,7 @@ def api_run_discover():
     data = request.get_json(silent=True) or {}
     query = (data.get("query") or "chemistry").strip()
     category, _ = _category_kind(data)
+    find_emails = bool(data.get("find_emails"))
     cfg = load_config()
     model = cfg["model"]["name"]
     # Finders lean on web search, not deep reasoning — keep effort low so results
@@ -725,7 +726,8 @@ def api_run_discover():
             rows = find_jobs(query, client, model, log=log, effort=effort, exclude=exclude)
             noun = "job opening"
         else:
-            rows = find_academics(query, client, model, log=log, effort=effort, exclude=exclude)
+            rows = find_academics(query, client, model, log=log, effort=effort,
+                                  exclude=exclude, enrich_emails=find_emails)
             noun = "researcher"
         if not rows:
             raise PipelineError(

@@ -462,8 +462,14 @@ def _exclude_clause(exclude: list[str] | None) -> str:
 
 
 def find_academics(query: str, client, model: str, log=print, count: int = 10,
-                   effort: str = "medium", exclude: list[str] | None = None) -> list[dict]:
-    """Web-search for individual professors in a field. Returns normalized contact rows."""
+                   effort: str = "medium", exclude: list[str] | None = None,
+                   enrich_emails: bool = False) -> list[dict]:
+    """Web-search for individual professors in a field. Returns normalized contact rows.
+
+    enrich_emails: when True, run the email finder (web search + SMTP verify) for
+    people whose email wasn't listed — slower, but turns names into sendable
+    contacts (academic directories rarely publish addresses).
+    """
     log(f"Searching the web for researchers in: {query} …")
     try:
         prompt = _PEOPLE_PROMPT.format(query=query, count=count) + _exclude_clause(exclude)
@@ -488,6 +494,28 @@ def find_academics(query: str, client, model: str, log=print, count: int = 10,
         })
         log(f"  {name} — {(p.get('affiliation') or '').strip()}")
     log(f"Found {len(out)} researcher(s).")
+
+    if enrich_emails:
+        from . import emailfinder
+        need = [r for r in out if not r["email"] and r["profile_url"]]
+        if need:
+            log(f"Looking up emails for {len(need)} researcher(s) without one — this is slower…")
+            for r in need:
+                domain = emailfinder.domain_from_url(r["profile_url"])
+                if not domain:
+                    continue
+                try:
+                    found = emailfinder.find_email(
+                        r["name"], domain, client=client, model=model,
+                        affiliation=r["affiliation"], log=log,
+                    )
+                except Exception as e:
+                    log(f"  ({r['name']}: email lookup error: {e})")
+                    continue
+                if found:
+                    r["email"] = found
+            got = sum(1 for r in need if r["email"])
+            log(f"Found emails for {got} of {len(need)}.")
     return out
 
 
