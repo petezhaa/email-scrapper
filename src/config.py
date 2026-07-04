@@ -1,65 +1,26 @@
-"""Loads configuration (config.yaml) and secrets (.env).
-
-Works both in development (running from the source folder) and as a packaged
-.exe/.app (PyInstaller). When frozen:
-  - RESOURCE_DIR is the read-only bundle PyInstaller unpacks (sys._MEIPASS),
-    holding default config.yaml/.env and the templates/static.
-  - ROOT is a writable folder next to the executable, where the user's edited
-    config, .env (with their Gmail creds), drafts, and resume actually live.
-"""
+"""Loads configuration (config.yaml) and secrets (.env) from the project root."""
 from __future__ import annotations
 
 import os
-import shutil
-import sys
 from pathlib import Path
 
 import yaml
 
-FROZEN = getattr(sys, "frozen", False)
+# Project root: config.yaml, .env, data/, drafts/, sent/, resume/ all live here.
+ROOT = Path(__file__).resolve().parent.parent
 
-if FROZEN:
-    # Read-only files bundled into the executable, unpacked at runtime.
-    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-    # Writable data lives in a folder next to the .exe/.app so it persists and
-    # the user can find their drafts. (_MEIPASS is wiped when the app closes.)
-    ROOT = Path(sys.executable).resolve().parent / "ResearchOutreach-data"
-else:
-    # Dev: source layout. Resources and writable data are both the repo root.
-    RESOURCE_DIR = Path(__file__).resolve().parent.parent
-    ROOT = RESOURCE_DIR
-
-# Files copied from the bundle into the writable ROOT on first run.
-_DEFAULT_FILES = ("config.yaml", ".env", "data/profile.md", "data/directory_urls.txt")
 _DATA_DIRS = ("data", "drafts", "sent", "resume")
 
 
 def bundled_dir(name: str) -> Path:
-    """Path to a bundled read-only resource folder (templates / static)."""
-    if FROZEN:
-        return RESOURCE_DIR / name
-    # Dev: templates/ and static/ live inside the src/ package.
+    """Path to a resource folder inside the src/ package (templates / static)."""
     return Path(__file__).resolve().parent / name
 
 
 def bootstrap() -> None:
-    """Ensure the writable ROOT exists and seed default files on first run.
-
-    No-op in dev (defaults already exist and are skipped). For a packaged app,
-    this copies bundled defaults — including the shared API key in .env — next
-    to the executable the first time it runs.
-    """
-    ROOT.mkdir(parents=True, exist_ok=True)
+    """Ensure the data folders exist so first run doesn't trip on missing dirs."""
     for d in _DATA_DIRS:
         (ROOT / d).mkdir(parents=True, exist_ok=True)
-    if not FROZEN:
-        return  # dev: nothing to seed
-    for rel in _DEFAULT_FILES:
-        dst = ROOT / rel
-        src = RESOURCE_DIR / rel
-        if src.exists() and not dst.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(src, dst)
 
 
 class ConfigError(RuntimeError):

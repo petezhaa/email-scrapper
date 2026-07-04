@@ -32,11 +32,9 @@ from .config import (
     update_env,
 )
 
-# Seed the writable data folder (no-op in dev) before anything reads config.
+# Make sure the data folders exist before anything reads config.
 bootstrap()
 
-# Explicit template/static folders so they resolve both in dev and when the app
-# is packaged as a single executable (PyInstaller unpacks them elsewhere).
 app = Flask(
     __name__,
     template_folder=str(bundled_dir("templates")),
