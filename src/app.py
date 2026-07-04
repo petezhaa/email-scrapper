@@ -245,12 +245,19 @@ def delete_contact():
     cfg = load_config()
     targets_path = resolve(cfg["paths"]["targets"])
     email = request.form.get("email", "").strip().lower()
-    if targets_path.exists() and email:
+    profile_url = request.form.get("profile_url", "").strip()
+    if targets_path.exists() and (email or profile_url):
+        def keep(r: dict) -> bool:
+            if email:
+                return (r.get("email") or "").strip().lower() != email
+            # Email-less contacts are identified by their profile URL instead.
+            return (r.get("profile_url") or "").strip() != profile_url
+
         with _CSV_LOCK:
             with targets_path.open("r", encoding="utf-8", newline="") as fh:
                 reader = csv.DictReader(fh)
                 fieldnames = reader.fieldnames or scrape.CSV_FIELDS
-                rows = [r for r in reader if (r.get("email") or "").strip().lower() != email]
+                rows = [r for r in reader if keep(r)]
             with targets_path.open("w", encoding="utf-8", newline="") as fh:
                 writer = csv.DictWriter(fh, fieldnames=fieldnames)
                 writer.writeheader()
@@ -288,7 +295,7 @@ def save_draft():
     drafts_dir = resolve(cfg["paths"]["drafts_dir"])
     slug = request.form.get("slug", "")
     path = drafts_dir / f"{slug}.md"
-    if path.exists():
+    if path.exists() and path.parent == drafts_dir:
         draft.write_draft_file(
             path,
             to=request.form.get("to", "").strip(),
@@ -359,7 +366,11 @@ def run_discover():
 @app.route("/run/draft", methods=["POST"])
 def run_draft():
     def _draft_fn(log):
-        return draft.run(log=log, keep_going=lambda: _job_running("scrape"))
+        # Keep drafting while either kind of contact-finding job is still running.
+        return draft.run(
+            log=log,
+            keep_going=lambda: _job_running("scrape") or _job_running("discover"),
+        )
     return jsonify(job_id=_start_job(_draft_fn, "draft", "Generating drafts"))
 
 
@@ -401,6 +412,7 @@ def jobs_status():
     targets_path = resolve(cfg["paths"]["targets"])
     contact_count = 0
     if targets_path.exists():
+        # csv.reader (not a raw line count): quoted fields can span lines.
         with targets_path.open("r", encoding="utf-8", newline="") as fh:
-            contact_count = max(0, sum(1 for _ in fh) - 1)  # minus header row
+            contact_count = max(0, sum(1 for _ in csv.reader(fh)) - 1)  # minus header
     return jsonify(jobs=out, draft_count=draft_count, contact_count=contact_count)

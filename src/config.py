@@ -151,50 +151,68 @@ def build_anthropic_client():
     return anthropic.Anthropic(**kwargs)
 
 
+def _gateway_client(s: dict, missing_hint: str):
+    """OpenAI-compatible client pointed at the shared gateway (ANTHROPIC_BASE_URL).
+
+    The gateway serves every provider behind one bearer token, using
+    provider-prefixed model ids (e.g. "azure/openai/gpt-4o"). The OpenAI SDK
+    needs /v1 appended to the base URL.
+    """
+    import openai
+
+    api_key = s["anthropic_auth_token"] or s["anthropic_api_key"]
+    if not api_key:
+        raise PipelineError(missing_hint)
+    base = s["anthropic_base_url"].rstrip("/") + "/v1"
+    return openai.OpenAI(base_url=base, api_key=api_key)
+
+
 def build_writer_client():
     """OpenAI client for the GPT writer step.
 
     Priority:
-      1. OPENAI_API_KEY → direct OpenAI (api.openai.com or OPENAI_BASE_URL override)
-      2. NVIDIA gateway  → same bearer token as Claude, ANTHROPIC_BASE_URL as base
+      1. Gateway (ANTHROPIC_BASE_URL set) — same bearer token as Claude. The
+         model ids in config.yaml are gateway-prefixed ("azure/openai/gpt-4o"),
+         which a direct OpenAI key can't serve, so the gateway must win when
+         one is configured.
+      2. OPENAI_API_KEY → direct OpenAI (api.openai.com or OPENAI_BASE_URL override)
     """
     import openai
 
     s = load_secrets()
+    if s["anthropic_base_url"]:
+        return _gateway_client(
+            s, "No gateway credential found. Set ANTHROPIC_API_KEY in .env."
+        )
     if s["openai_api_key"]:
         return openai.OpenAI(
             api_key=s["openai_api_key"],
             base_url=s["openai_base_url"] or None,  # None → default api.openai.com
         )
-    # Fall back to NVIDIA gateway — OpenAI SDK needs /v1 appended to the base URL
-    api_key = s["anthropic_auth_token"] or s["anthropic_api_key"]
-    if not api_key:
-        raise PipelineError("No OpenAI or NVIDIA credential found. Set OPENAI_API_KEY in .env.")
-    nvidia_base = (s["anthropic_base_url"] or "").rstrip("/") + "/v1"
-    return openai.OpenAI(base_url=nvidia_base, api_key=api_key)
+    raise PipelineError("No OpenAI or gateway credential found. Set OPENAI_API_KEY in .env.")
 
 
 def build_reviewer_client():
     """OpenAI-compatible client for the Gemini reviewer step.
 
     Priority:
-      1. GEMINI_API_KEY → Google's OpenAI-compatible endpoint
-      2. NVIDIA gateway  → same bearer token as Claude, ANTHROPIC_BASE_URL as base
+      1. Gateway (ANTHROPIC_BASE_URL set) — same bearer token as Claude; the
+         reviewer model id in config.yaml is gateway-prefixed.
+      2. GEMINI_API_KEY → Google's OpenAI-compatible endpoint
     """
     import openai
 
     s = load_secrets()
+    if s["anthropic_base_url"]:
+        return _gateway_client(
+            s, "No gateway credential found. Set ANTHROPIC_API_KEY in .env."
+        )
     if s["gemini_api_key"]:
         return openai.OpenAI(
             api_key=s["gemini_api_key"],
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
-    # Fall back to NVIDIA gateway — OpenAI SDK needs /v1 appended to the base URL
-    api_key = s["anthropic_auth_token"] or s["anthropic_api_key"]
-    if not api_key:
-        raise PipelineError("No Gemini or NVIDIA credential found. Set GEMINI_API_KEY in .env.")
-    nvidia_base = (s["anthropic_base_url"] or "").rstrip("/") + "/v1"
-    return openai.OpenAI(base_url=nvidia_base, api_key=api_key)
+    raise PipelineError("No Gemini or gateway credential found. Set GEMINI_API_KEY in .env.")
 
 
 def build_openai_client():

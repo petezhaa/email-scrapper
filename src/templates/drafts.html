@@ -8,12 +8,13 @@
     <button type="button" class="run primary" data-action="send" data-title="Sending approved emails"
             data-confirm="Send all APPROVED emails now? This cannot be undone."
             data-redirect="{{ url_for('drafts') }}"
-            {% if not counts.get('approved') %}disabled{% endif %}>Send approved →</button>
+            {% if not counts.get('approved') %}disabled{% endif %}>Send approved &rarr;</button>
   </div>
 </div>
 
 {% if not items %}
-  <p class="empty">No drafts yet. Go to <a href="{{ url_for('contacts') }}">Contacts</a>
+  <p class="empty"><span class="empty-icon">&#9998;</span>
+    No drafts yet. Go to <a href="{{ url_for('contacts') }}">Contacts</a>
     and click "Generate drafts".</p>
 {% else %}
   <p class="hint">Edit anything. Set status to <b>approved</b> to queue an email for sending,
@@ -40,6 +41,7 @@
       <button type="submit" class="primary">Save</button>
       <button type="submit" formaction="{{ url_for('delete_draft') }}" class="link danger"
               onclick="return confirm('Delete this draft?')">Delete</button>
+      <span class="draft-dirty">unsaved changes</span>
     </div>
   </form>
   {% endfor %}

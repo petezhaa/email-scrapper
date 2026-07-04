@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import csv
+import json
 import smtplib
 import ssl
 import time
@@ -40,9 +41,16 @@ def parse_draft(path: Path) -> dict:
                     key = key.strip()
                     # Strip inline "# ..." comments and surrounding whitespace.
                     val = val.split("#", 1)[0].strip() if key == "status" else val.strip()
-                    # write_draft_file wraps values in json.dumps() — strip the quotes.
+                    # write_draft_file wraps values with json.dumps() (which escapes
+                    # non-ASCII: an em dash becomes "—"). Decode it back rather
+                    # than just stripping quotes, or those escapes leak into the UI
+                    # and the sent email. Fall back to the raw text for files that
+                    # were hand-edited without JSON quoting.
                     if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
-                        val = val[1:-1]
+                        try:
+                            val = json.loads(val)
+                        except (ValueError, json.JSONDecodeError):
+                            val = val[1:-1]
                     if key in meta:
                         meta[key] = val
     meta["body"] = body.strip()

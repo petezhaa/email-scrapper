@@ -147,6 +147,30 @@ document.querySelectorAll("button.run").forEach((btn) => {
 pollJobs();
 setInterval(pollJobs, 2000);
 
+// ── Drafts page: auto-grow bodies, unsaved indicator, live status accent ──
+const STATUSES = ["pending", "approved", "skip", "sent"];
+document.querySelectorAll("form.draft").forEach((form) => {
+  const ta = form.querySelector("textarea");
+  if (ta) {
+    const grow = () => {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight + 2, 640) + "px";
+    };
+    ta.addEventListener("input", grow);
+    grow();
+  }
+  const markDirty = () => form.classList.add("dirty");
+  form.addEventListener("input", markDirty);
+  const sel = form.querySelector("select[name=status]");
+  if (sel) {
+    sel.addEventListener("change", () => {
+      markDirty();
+      STATUSES.forEach((s) => form.classList.remove("status-" + s));
+      form.classList.add("status-" + sel.value);
+    });
+  }
+});
+
 // ── Contacts search + research filter ─────────────────────────────────────
 const searchInput = document.getElementById("contact-search");
 const researchInput = document.getElementById("research-filter");

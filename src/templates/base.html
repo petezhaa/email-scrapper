@@ -3,16 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Research Outreach — {{ active|capitalize }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body data-page="{{ active }}">
   <header>
-    <h1>Research Outreach</h1>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">&#9993;</span>
+      <h1>Research Outreach</h1>
+    </div>
     <nav>
-      <a href="{{ url_for('setup') }}" class="{{ 'on' if active=='setup' }}">1 · Setup</a>
-      <a href="{{ url_for('contacts') }}" class="{{ 'on' if active=='contacts' }}">2 · Contacts</a>
-      <a href="{{ url_for('drafts') }}" class="{{ 'on' if active=='drafts' }}">3 · Drafts</a>
+      <a href="{{ url_for('setup') }}" class="{{ 'on' if active=='setup' }}">
+        <span class="step-num">1</span>Setup</a>
+      <a href="{{ url_for('contacts') }}" class="{{ 'on' if active=='contacts' }}">
+        <span class="step-num">2</span>Contacts</a>
+      <a href="{{ url_for('drafts') }}" class="{{ 'on' if active=='drafts' }}">
+        <span class="step-num">3</span>Drafts</a>
     </nav>
   </header>
 
@@ -26,7 +33,7 @@
     <span id="jobbar-spin" class="spin"></span>
     <span id="jobbar-msg"></span>
     <span id="jobbar-actions"></span>
-    <button id="jobbar-dismiss" type="button" title="Hide">×</button>
+    <button id="jobbar-dismiss" type="button" title="Hide">&times;</button>
   </div>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>

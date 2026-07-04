@@ -5,12 +5,13 @@
   <h2>Contacts <span class="count">{{ rows|length }}</span></h2>
   <button type="button" class="run primary" data-action="draft" data-title="Drafting emails"
           data-redirect="{{ url_for('drafts') }}"
-          {% if not rows %}disabled{% endif %}>Generate drafts →</button>
+          {% if not rows %}disabled{% endif %}>Generate drafts &rarr;</button>
 </div>
 
 {% if not rows %}
-  <p class="empty">No contacts yet. Go to <a href="{{ url_for('setup') }}">Setup</a>,
-    add school URLs, and click "Scrape schools".</p>
+  <p class="empty"><span class="empty-icon">&#128269;</span>
+    No contacts yet. Go to <a href="{{ url_for('setup') }}">Setup</a>,
+    add organizations or URLs, and start a scrape.</p>
 {% else %}
   <div class="search-bar">
     <input type="search" id="contact-search" placeholder="Search all… (Ctrl+F / ⌘F)"
@@ -21,6 +22,7 @@
   </div>
   <p class="hint">Review and remove anyone irrelevant before generating drafts.
     Generating a draft never overwrites one you've already edited.</p>
+  <div class="table-card">
   <table>
     <thead>
       <tr><th>Name</th><th>Email</th><th>Title / Affiliation</th><th>Research interests</th><th></th></tr>
@@ -45,7 +47,7 @@
               <button type="submit" class="link">save</button>
             </form>
           {% else %}
-            <span class="muted-em">—</span>
+            <span class="muted-em">&mdash;</span>
           {% endif %}
         </td>
         <td>
@@ -56,6 +58,7 @@
         <td>
           <form method="post" action="{{ url_for('delete_contact') }}" class="inline">
             <input type="hidden" name="email" value="{{ r.email }}">
+            <input type="hidden" name="profile_url" value="{{ r.profile_url|e }}">
             <button type="submit" class="link danger">remove</button>
           </form>
         </td>
@@ -63,6 +66,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
 {% endif %}
 
 {% endblock %}
