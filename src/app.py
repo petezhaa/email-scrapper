@@ -701,7 +701,19 @@ def api_run_discover():
     category, _ = _category_kind(data)
     cfg = load_config()
     model = cfg["model"]["name"]
-    effort = cfg["model"].get("effort", "medium")
+    # Finders lean on web search, not deep reasoning — keep effort low so results
+    # come back fast.
+    effort = "low"
+
+    # Exclude people already saved in this category so re-running "adds more"
+    # instead of returning the same names.
+    existing = [r for r in _contacts_rows() if (r.get("category") or "research") == category]
+    exclude = [
+        (f"{r.get('name','')} ({r.get('affiliation','')})".strip()
+         if r.get("affiliation") else r.get("name", ""))
+        for r in existing
+    ]
+    exclude = [e for e in exclude if e][-60:]
 
     def _fn(log):
         from .config import build_anthropic_client
@@ -710,10 +722,10 @@ def api_run_discover():
         # Field search uses the web-search agent to return real individuals /
         # openings directly (robust to JS-rendered directories).
         if category == "industry":
-            rows = find_jobs(query, client, model, log=log, effort=effort)
+            rows = find_jobs(query, client, model, log=log, effort=effort, exclude=exclude)
             noun = "job opening"
         else:
-            rows = find_academics(query, client, model, log=log, effort=effort)
+            rows = find_academics(query, client, model, log=log, effort=effort, exclude=exclude)
             noun = "researcher"
         if not rows:
             raise PipelineError(

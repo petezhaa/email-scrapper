@@ -38,12 +38,7 @@ export default function RootLayout({
       <body
         className={`${inter.variable} ${fraunces.variable} ${mono.variable} antialiased min-h-dvh`}
       >
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           <SiteHeader />
           <main className="mx-auto w-full max-w-5xl px-6 pb-32 pt-10">
             <PageTransition>{children}</PageTransition>

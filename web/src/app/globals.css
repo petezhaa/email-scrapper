@@ -62,20 +62,20 @@
   --radius: 0.5rem;
 
   --background: #f5f1e8;
-  --foreground: #211f1a;
+  --foreground: #241c17;       /* espresso ink               */
   --card: #fdfbf6;
-  --card-foreground: #211f1a;
+  --card-foreground: #241c17;
   --popover: #fdfbf6;
-  --popover-foreground: #211f1a;
+  --popover-foreground: #241c17;
 
-  --primary: #211f1a;          /* ink — solid buttons        */
-  --primary-foreground: #fdfbf6;
+  --primary: #3f5f46;          /* muted forest — solid/Send  */
+  --primary-foreground: #f4ebdd;
   --secondary: #ece6d8;        /* recessed paper             */
-  --secondary-foreground: #211f1a;
+  --secondary-foreground: #241c17;
   --muted: #ece6d8;
-  --muted-foreground: #635c4e;
+  --muted-foreground: #7b6b5c;
   --accent: #f0e9db;           /* subtle hover surface       */
-  --accent-foreground: #211f1a;
+  --accent-foreground: #241c17;
 
   --brand: #b04a26;            /* terracotta                 */
   --brand-foreground: #fdfbf6;
@@ -108,20 +108,20 @@
 /* ── Dark: warm espresso, cream ink, lifted terracotta ────────────────── */
 .dark {
   --background: #16130d;
-  --foreground: #ece4d3;
+  --foreground: #f4ebdd;       /* warm paper text            */
   --card: #211c14;
-  --card-foreground: #ece4d3;
+  --card-foreground: #f4ebdd;
   --popover: #211c14;
-  --popover-foreground: #ece4d3;
+  --popover-foreground: #f4ebdd;
 
-  --primary: #ece4d3;
-  --primary-foreground: #16130d;
+  --primary: #557d61;          /* lifted forest for dark bg  */
+  --primary-foreground: #f4ebdd;
   --secondary: #2a241a;
-  --secondary-foreground: #ece4d3;
+  --secondary-foreground: #f4ebdd;
   --muted: #2a241a;
   --muted-foreground: #a89e8a;
   --accent: #2a241a;
-  --accent-foreground: #ece4d3;
+  --accent-foreground: #f4ebdd;
 
   --brand: #d97a4e;
   --brand-foreground: #16130d;
@@ -197,6 +197,44 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .page-enter {
+    animation: none;
+  }
+}
+
+/* Light/dark switch: crossfade colors only during the change (added by the
+   toggle for ~500ms), so hovers stay snappy. Like a room's lights dimming. */
+@media (prefers-reduced-motion: no-preference) {
+  html.theme-anim,
+  html.theme-anim *,
+  html.theme-anim *::before,
+  html.theme-anim *::after {
+    transition:
+      background-color 0.5s ease,
+      border-color 0.5s ease,
+      color 0.5s ease,
+      fill 0.5s ease,
+      stroke 0.5s ease,
+      box-shadow 0.5s ease !important;
+    transition-delay: 0s !important;
+  }
+}
+
+@keyframes theme-icon-in {
+  from {
+    opacity: 0;
+    transform: rotate(-35deg) scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(0) scale(1);
+  }
+}
+.theme-icon {
+  display: inline-flex;
+  animation: theme-icon-in 0.35s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .theme-icon {
     animation: none;
   }
 }

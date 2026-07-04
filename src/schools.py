@@ -328,7 +328,7 @@ def discover_orgs(query: str, client, model: str, log=print, kind: str = "indust
 # HTML rarely yields the actual people. Instead we let the web-search agent browse
 # directories and profile pages and return individuals (or job openings) directly.
 
-_FINDER_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 12}
+_FINDER_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
 
 _PEOPLE_SCHEMA = {
     "type": "object",
@@ -423,7 +423,10 @@ def _finder_search(prompt: str, schema: dict, client, model: str, log,
     """Run a web-search agent turn (handling pause_turn) and parse its JSON result."""
     messages = [{"role": "user", "content": prompt}]
     resp = None
-    for _ in range(14):
+    for i in range(8):
+        if i:
+            # Heartbeat so the job bar shows life during the (slow) web browsing.
+            log(f"  · still searching the web… (round {i + 1})")
         resp = client.messages.create(
             model=model,
             max_tokens=16000,
@@ -448,13 +451,23 @@ def _finder_search(prompt: str, schema: dict, client, model: str, log,
         return json.loads(match.group(0)) if match else {}
 
 
-def find_academics(query: str, client, model: str, log=print, count: int = 25,
-                   effort: str = "medium") -> list[dict]:
+def _exclude_clause(exclude: list[str] | None) -> str:
+    if not exclude:
+        return ""
+    names = "; ".join(x for x in exclude[:60] if x)
+    if not names:
+        return ""
+    return ("\n\nIMPORTANT: do NOT return any of these — they are already found, "
+            f"so find DIFFERENT ones:\n{names}")
+
+
+def find_academics(query: str, client, model: str, log=print, count: int = 10,
+                   effort: str = "medium", exclude: list[str] | None = None) -> list[dict]:
     """Web-search for individual professors in a field. Returns normalized contact rows."""
     log(f"Searching the web for researchers in: {query} …")
     try:
-        data = _finder_search(_PEOPLE_PROMPT.format(query=query, count=count),
-                              _PEOPLE_SCHEMA, client, model, log, effort=effort)
+        prompt = _PEOPLE_PROMPT.format(query=query, count=count) + _exclude_clause(exclude)
+        data = _finder_search(prompt, _PEOPLE_SCHEMA, client, model, log, effort=effort)
     except Exception as e:
         log(f"Researcher search failed: {e}")
         return []
@@ -478,13 +491,13 @@ def find_academics(query: str, client, model: str, log=print, count: int = 25,
     return out
 
 
-def find_jobs(query: str, client, model: str, log=print, count: int = 25,
-              effort: str = "medium") -> list[dict]:
+def find_jobs(query: str, client, model: str, log=print, count: int = 10,
+              effort: str = "medium", exclude: list[str] | None = None) -> list[dict]:
     """Web-search for industry job openings + who to contact. Returns contact rows."""
     log(f"Searching the web for job openings in: {query} …")
     try:
-        data = _finder_search(_JOBS_PROMPT.format(query=query, count=count),
-                             _JOBS_SCHEMA, client, model, log, effort=effort)
+        prompt = _JOBS_PROMPT.format(query=query, count=count) + _exclude_clause(exclude)
+        data = _finder_search(prompt, _JOBS_SCHEMA, client, model, log, effort=effort)
     except Exception as e:
         log(f"Job search failed: {e}")
         return []

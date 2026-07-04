@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { toast } from "sonner";
 import {
   ArrowRight,
@@ -68,7 +68,6 @@ const MODES: Record<
 };
 
 export default function FindPage() {
-  const router = useRouter();
   const [tab, setTab] = useState<ContactCategory>("research");
   const [query, setQuery] = useState("");
   const [schools, setSchools] = useState("");
@@ -108,9 +107,12 @@ export default function FindPage() {
     try {
       await saveOpts();
       await api.runDiscover(query.trim(), tab);
-      router.push("/contacts");
+      toast.success(
+        "Searching — new contacts are added to Contacts. Search again to add more.",
+      );
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
+    } finally {
       setBusy(null);
     }
   }
@@ -124,21 +126,29 @@ export default function FindPage() {
     try {
       await saveOpts();
       await api.runScrape(tab);
-      router.push("/contacts");
+      toast.success("Scraping — new contacts are added to Contacts.");
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
+    } finally {
       setBusy(null);
     }
   }
 
   return (
     <div className="space-y-6">
-      <header className="space-y-2">
-        <h1 className="text-3xl">Find contacts</h1>
-        <p className="max-w-2xl text-[15px] text-muted-foreground">
-          Search a field and the app finds organizations, locates their people
-          pages, and scrapes individual contacts — tagged by where they work.
-        </p>
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-2">
+          <h1 className="text-3xl">Find contacts</h1>
+          <p className="max-w-2xl text-[15px] text-muted-foreground">
+            Search a field and the app finds real people (or job openings) and
+            adds them to Contacts — tagged by where they work. Each search adds a
+            fresh batch of ~10; run it again to gather more.
+          </p>
+        </div>
+        <Button variant="outline" render={<Link href="/contacts" />}>
+          View contacts
+          <ArrowRight className="size-4" />
+        </Button>
       </header>
 
       <Tabs
