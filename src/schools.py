@@ -251,14 +251,37 @@ Your entire response must be ONLY this JSON array, with no text before or after 
   {{"name": "Company Name", "url": "https://company.com/people", "focus": "one sentence"}}
 ]"""
 
+_DISCOVER_PROMPT_ACADEMIA = """\
+Search the web and find 8-12 universities or academic research institutions with \
+labs / faculty working in: {query}
 
-def discover_orgs(query: str, client, model: str, log=print) -> list[str]:
-    """Web-search for industry organizations in the given field.
+Steps:
+1. Search "{query} university department faculty" — find strong departments
+2. Search "{query} research lab faculty directory" — find more institutions
+3. For each one, find the department's faculty / people directory page that lists \
+   individual professors by name with profile links
 
-    Returns a list of researcher-directory URLs to feed into the scraper.
+Only include institutions where you actually found a faculty/people directory page \
+URL (not a general homepage, not an admissions page — the actual page listing faculty \
+names with profile links).
+
+Your entire response must be ONLY this JSON array, with no text before or after it:
+[
+  {{"name": "University — Department", "url": "https://university.edu/people", "focus": "one sentence"}},
+  {{"name": "University — Department", "url": "https://dept.university.edu/faculty", "focus": "one sentence"}}
+]"""
+
+
+def discover_orgs(query: str, client, model: str, log=print, kind: str = "industry") -> list[str]:
+    """Web-search for organizations in the given field.
+
+    kind="industry" finds biotech/pharma companies; kind="academia" finds
+    universities/departments. Returns researcher-directory URLs for the scraper.
     """
-    log(f"Searching for organizations in: {query}...")
-    prompt = _DISCOVER_PROMPT.format(query=query)
+    where = "universities/institutions" if kind == "academia" else "organizations"
+    log(f"Searching for {where} in: {query}...")
+    template = _DISCOVER_PROMPT_ACADEMIA if kind == "academia" else _DISCOVER_PROMPT
+    prompt = template.format(query=query)
     messages = [{"role": "user", "content": prompt}]
     try:
         for _ in range(8):
@@ -298,6 +321,198 @@ def discover_orgs(query: str, client, model: str, log=print) -> list[str]:
             urls.append(url)
     log(f"Discovered {len(urls)} organization(s).")
     return urls
+
+
+# ── Agentic people / jobs finders ───────────────────────────────────────────
+# Modern faculty and company directories are JS/search-driven, so fetching their
+# HTML rarely yields the actual people. Instead we let the web-search agent browse
+# directories and profile pages and return individuals (or job openings) directly.
+
+_FINDER_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 12}
+
+_PEOPLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "people": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "title": {"type": "string"},
+                    "affiliation": {"type": "string"},
+                    "research_interests": {"type": "string"},
+                    "profile_url": {"type": "string"},
+                    "email": {"type": "string"},
+                },
+                "required": ["name", "title", "affiliation", "research_interests",
+                             "profile_url", "email"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["people"],
+    "additionalProperties": False,
+}
+
+_JOBS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "jobs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "job_title": {"type": "string"},
+                    "company": {"type": "string"},
+                    "job_url": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "contact_name": {"type": "string"},
+                    "contact_title": {"type": "string"},
+                    "contact_email": {"type": "string"},
+                    "contact_url": {"type": "string"},
+                },
+                "required": ["job_title", "company", "job_url", "summary",
+                             "contact_name", "contact_title", "contact_email",
+                             "contact_url"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["jobs"],
+    "additionalProperties": False,
+}
+
+_PEOPLE_PROMPT = """\
+Use web search to find {count} individual academic researchers whose work is in: {query}.
+
+Browse university department faculty directories and the researchers' own profile pages.
+For each real person, collect:
+  - name: their full name
+  - title: academic title (e.g. "Associate Professor")
+  - affiliation: "University — Department"
+  - research_interests: one sentence on what they actually study
+  - profile_url: their faculty/lab profile page URL (not the directory listing)
+  - email: their academic email if it is publicly listed, otherwise ""
+
+Only include active, individual faculty — not labs, not staff pages, not emeritus.
+Spread across several institutions. Leave a field "" if you truly cannot find it, but
+always include name, title, affiliation, and profile_url."""
+
+_JOBS_PROMPT = """\
+Use web search to find {count} CURRENT job openings related to: {query}, at biotech,
+pharma, chemistry, or research companies (industry, not academia).
+
+Browse company careers pages and job boards. For each opening, collect:
+  - job_title: the role title
+  - company: the hiring company
+  - job_url: a direct link to the job posting
+  - summary: one sentence on the role / key requirements
+  - contact_name: a specific person to reach out to (hiring manager, team lead, or
+    recruiter) if you can find one, otherwise ""
+  - contact_title: that person's title, otherwise ""
+  - contact_email: their email if publicly findable, otherwise ""
+  - contact_url: their LinkedIn or profile URL if findable, otherwise ""
+
+Prefer real, currently-open postings. Always include job_title, company, job_url, and
+summary; leave the contact_* fields "" when you cannot find a person."""
+
+
+def _finder_search(prompt: str, schema: dict, client, model: str, log,
+                   effort: str = "medium") -> dict:
+    """Run a web-search agent turn (handling pause_turn) and parse its JSON result."""
+    messages = [{"role": "user", "content": prompt}]
+    resp = None
+    for _ in range(14):
+        resp = client.messages.create(
+            model=model,
+            max_tokens=16000,
+            tools=[_FINDER_TOOL],
+            output_config={
+                "effort": effort,
+                "format": {"type": "json_schema", "schema": schema},
+            },
+            messages=messages,
+        )
+        if resp.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": resp.content})
+            continue
+        break
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except (ValueError, json.JSONDecodeError):
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        return json.loads(match.group(0)) if match else {}
+
+
+def find_academics(query: str, client, model: str, log=print, count: int = 25,
+                   effort: str = "medium") -> list[dict]:
+    """Web-search for individual professors in a field. Returns normalized contact rows."""
+    log(f"Searching the web for researchers in: {query} …")
+    try:
+        data = _finder_search(_PEOPLE_PROMPT.format(query=query, count=count),
+                              _PEOPLE_SCHEMA, client, model, log, effort=effort)
+    except Exception as e:
+        log(f"Researcher search failed: {e}")
+        return []
+    out = []
+    for p in data.get("people") or []:
+        name = (p.get("name") or "").strip()
+        if not name:
+            continue
+        profile = (p.get("profile_url") or "").strip()
+        out.append({
+            "name": name,
+            "email": (p.get("email") or "").strip(),
+            "title": (p.get("title") or "").strip(),
+            "affiliation": (p.get("affiliation") or "").strip(),
+            "research_interests": (p.get("research_interests") or "").strip(),
+            "profile_url": profile,
+            "source_url": profile,
+        })
+        log(f"  {name} — {(p.get('affiliation') or '').strip()}")
+    log(f"Found {len(out)} researcher(s).")
+    return out
+
+
+def find_jobs(query: str, client, model: str, log=print, count: int = 25,
+              effort: str = "medium") -> list[dict]:
+    """Web-search for industry job openings + who to contact. Returns contact rows."""
+    log(f"Searching the web for job openings in: {query} …")
+    try:
+        data = _finder_search(_JOBS_PROMPT.format(query=query, count=count),
+                             _JOBS_SCHEMA, client, model, log, effort=effort)
+    except Exception as e:
+        log(f"Job search failed: {e}")
+        return []
+    out = []
+    for jb in data.get("jobs") or []:
+        title = (jb.get("job_title") or "").strip()
+        company = (jb.get("company") or "").strip()
+        if not title and not company:
+            continue
+        contact = (jb.get("contact_name") or "").strip()
+        contact_title = (jb.get("contact_title") or "").strip()
+        job_url = (jb.get("job_url") or "").strip()
+        contact_url = (jb.get("contact_url") or "").strip()
+        display_title = title
+        if contact and contact_title:
+            display_title = f"{title} · contact: {contact_title}"
+        out.append({
+            "name": contact or company,
+            "email": (jb.get("contact_email") or "").strip(),
+            "title": display_title,
+            "affiliation": company,
+            "research_interests": (jb.get("summary") or "").strip(),
+            "profile_url": contact_url or job_url,
+            "source_url": job_url,
+        })
+        log(f"  {title} @ {company}" + (f" — contact {contact}" if contact else ""))
+    log(f"Found {len(out)} opening(s).")
+    return out
 
 
 def resolve_school(name: str, client, model: str, log=print) -> list[str]:

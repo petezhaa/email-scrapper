@@ -85,8 +85,8 @@
       <input type="checkbox" name="verify_persons" value="1" {{ 'checked' if verify_persons }}>
       AI-verify each person is an individual (not a lab or team page)
     </label>
-    <hr style="margin:1rem 0; border:none; border-top:1px solid var(--line)">
-    <p class="hint" style="margin-bottom:0.4rem"><b>Or add specific URLs / organization names</b> (one per line):</p>
+    <hr>
+    <p class="hint"><b>Or add specific URLs / organization names</b> (one per line):</p>
     <textarea name="schools" rows="3" placeholder="Genentech&#10;Relay Therapeutics&#10;https://www.somecompany.com/team">{{ schools|e }}</textarea>
     <p class="hint">Enter company names (e.g. "Genentech", "Caltech") or paste a direct team-page URL.
       Known organizations are looked up instantly; unknown names are web-searched.</p>

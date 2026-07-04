@@ -1,53 +1,33 @@
-# Most of these are set for each user via the Setup page in the app.
-# You only need to touch this file directly for advanced tweaks.
-
-# ── Who you are (Setup page overwrites sender.name) ──
 sender:
-  name: ""
-  phone: ""
+  name: ''
+  phone: ''
   links: []
-
-# ── Files ──
 paths:
-  profile: "data/profile.md"
-  targets: "data/targets.csv"
-  directory_urls: "data/directory_urls.txt"
-  drafts_dir: "drafts"
-  sent_dir: "sent"
-  resume: "resume/your_resume.pdf"
-
-# ── Drafting ──
+  profile: data/profile.md
+  targets: data/targets.csv
+  directory_urls: data/directory_urls.txt
+  drafts_dir: drafts
+  sent_dir: sent
+  resume: resume/HW3_3.pdf
 drafting:
-  web_research: true       # web-search each professor's recent papers for a stronger hook (slower)
-  quality_review: true     # second Claude pass to polish each draft against the style guide
-
-# ── Claude model ──
-# The NVIDIA gateway needs a provider-prefixed model id (see /v1/models).
-# Verified working with this key: azure/anthropic/claude-sonnet-4-6.
-# Other options your key can use: azure/anthropic/claude-opus-4-6,
-# aws/anthropic/bedrock-claude-sonnet-4-6, azure/anthropic/claude-haiku-4-5.
+  web_research: true
+  quality_review: true
 model:
-  name: "azure/anthropic/claude-sonnet-4-6"   # Step 1: researches the professor (web search)
-  writer: "azure/openai/gpt-4o"                # Step 2: writes the email
-  reviewer: "gcp/google/gemini-2.5-flash"      # Step 3: reviews + fixes the email
-  effort: "medium"                             # low | medium | high | max
-
-# ── Email defaults ──
+  name: azure/anthropic/claude-sonnet-4-6
+  writer: azure/openai/gpt-4o
+  reviewer: gcp/google/gemini-2.5-flash
+  effort: medium
 email:
-  subject_fallback: "Prospective research student - inquiry"
+  subject_fallback: Prospective research student - inquiry
   append_fixed_signature: false
-
-# ── Scraping ──
 scraping:
-  respect_robots: false      # if true, skip pages whose robots.txt disallows scraping
-  follow_profiles: true      # visit each person's profile page to find their email
-  verify_persons: false      # use AI to read each profile page and confirm it's a real person
-  filter_by_research: false  # use AI to skip professors outside biophysics/structural biology fields
-  max_profile_fetches: 1000  # cap profile-page visits per run (effectively "everyone")
-  max_pages: 50              # follow up to this many "next page" links per listing
-
-# ── Safety / rate limiting (protects accounts from spam flags) ──
+  respect_robots: false
+  follow_profiles: true
+  verify_persons: false
+  filter_by_research: false
+  max_profile_fetches: 1000
+  max_pages: 50
 sending:
-  max_per_run: 50          # cap per send run (Gmail free tier maxes ~500/day total)
-  delay_seconds: 5         # small gap between sends so Gmail doesn't flag a burst
+  max_per_run: 50
+  delay_seconds: 5
   dry_run_default: true

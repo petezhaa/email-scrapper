@@ -29,7 +29,7 @@ USER_AGENT = (
     "Mozilla/5.0 (compatible; research-outreach-helper/1.0; personal academic use)"
 )
 
-CSV_FIELDS = ["name", "email", "title", "affiliation", "research_interests", "profile_url", "source_url"]
+CSV_FIELDS = ["name", "email", "title", "affiliation", "research_interests", "profile_url", "source_url", "category"]
 
 # JSON schema Claude must conform to when extracting people from a page.
 EXTRACT_SCHEMA = {
@@ -426,6 +426,66 @@ def _extract_people(client, model: str, effort: str, page_text: str) -> list[dic
     return data.get("people", [])
 
 
+def _migrate_targets(targets_path: Path) -> None:
+    """Add the `category` column to a pre-existing targets.csv (default research),
+    so appends stay column-aligned."""
+    if not targets_path.exists():
+        return
+    with targets_path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        existing_fields = reader.fieldnames or []
+        if "category" in existing_fields:
+            return
+        legacy_rows = list(reader)
+    with targets_path.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        w.writeheader()
+        for r in legacy_rows:
+            r.setdefault("category", "research")
+            w.writerow({k: r.get(k, "") for k in CSV_FIELDS})
+
+
+def save_contacts(rows: list[dict], category: str = "research", log=print) -> int:
+    """Append normalized contact rows to targets.csv with de-duplication.
+
+    Used by the agentic finders (find_academics / find_jobs). Dedupes by email,
+    else by profile_url. Returns the number of new contacts written.
+    """
+    cfg = load_config()
+    targets_path = resolve(cfg["paths"]["targets"])
+    targets_path.parent.mkdir(parents=True, exist_ok=True)
+    _migrate_targets(targets_path)
+
+    seen_emails, seen_profiles = _load_existing(targets_path)
+    write_header = not targets_path.exists()
+    added = 0
+    with targets_path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        if write_header:
+            writer.writeheader()
+        for r in rows:
+            email = (r.get("email") or "").strip().lower()
+            profile = (r.get("profile_url") or "").strip()
+            has_email = bool(email and "@" in email)
+            if not has_email and not profile:
+                continue
+            if has_email and email in seen_emails:
+                continue
+            if not has_email and profile in seen_profiles:
+                continue
+            row = {k: (r.get(k) or "") for k in CSV_FIELDS}
+            row["email"] = email
+            row["category"] = category
+            writer.writerow(row)
+            fh.flush()  # visible to the Contacts page immediately
+            if has_email:
+                seen_emails.add(email)
+            if profile:
+                seen_profiles.add(profile)
+            added += 1
+    return added
+
+
 def _load_existing(targets_path: Path) -> tuple[set[str], set[str]]:
     """Return (seen_emails, seen_profile_urls) for deduplication."""
     if not targets_path.exists():
@@ -443,13 +503,16 @@ def _load_existing(targets_path: Path) -> tuple[set[str], set[str]]:
     return emails, profiles
 
 
-def run(log=print, extra_urls: list[str] | None = None) -> dict:
+def run(log=print, extra_urls: list[str] | None = None, category: str = "research") -> dict:
     cfg = load_config()
     client = build_anthropic_client()  # raises PipelineError if no credential
 
     urls_path = resolve(cfg["paths"]["directory_urls"])
     targets_path = resolve(cfg["paths"]["targets"])
     targets_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Migrate older targets.csv files that predate the `category` column.
+    _migrate_targets(targets_path)
 
     model = cfg["model"]["name"]
     effort = cfg["model"].get("effort", "high")
@@ -604,6 +667,7 @@ def run(log=print, extra_urls: list[str] | None = None) -> dict:
                     "research_interests": interests,
                     "profile_url": profile_url,
                     "source_url": page_url,
+                    "category": category,
                 }
             )
             out_file.flush()  # make the row visible to the Contacts page now

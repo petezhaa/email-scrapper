@@ -13,9 +13,13 @@
 </div>
 
 {% if not items %}
-  <p class="empty"><span class="empty-icon">&#9998;</span>
+  <p class="empty">
+    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 20h16"></path><path d="M14.5 4.5 19 9 8 20l-4.5.5L4 16z"></path>
+    </svg>
     No drafts yet. Go to <a href="{{ url_for('contacts') }}">Contacts</a>
-    and click "Generate drafts".</p>
+    and click &ldquo;Generate drafts&rdquo;.</p>
 {% else %}
   <p class="hint">Edit anything. Set status to <b>approved</b> to queue an email for sending,
     or <b>skip</b> to ignore it. Sent emails are marked <b>sent</b> and won't resend.</p>

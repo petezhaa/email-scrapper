@@ -85,7 +85,7 @@ def status() -> None:
 
 
 def _build_message(sender: str, sender_name: str, draft: dict, resume: Path | None,
-                   fixed_sig: str | None) -> EmailMessage:
+                   fixed_sig: str | None, html: str | None = None) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = f"{sender_name} <{sender}>"
     msg["To"] = draft["to"]
@@ -93,7 +93,11 @@ def _build_message(sender: str, sender_name: str, draft: dict, resume: Path | No
     body = draft["body"]
     if fixed_sig:
         body = body.rstrip() + "\n\n" + fixed_sig
+    # Plain text is the always-present fallback; the React Email HTML (rendered
+    # by the Next app) is added as the richer alternative when provided.
     msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
     if resume and resume.exists():
         data = resume.read_bytes()
         msg.add_attachment(
@@ -124,12 +128,17 @@ def _log_sent(sent_dir: Path, draft: dict) -> None:
         w.writerow([datetime.now(timezone.utc).isoformat(), draft["to"], draft["name"], draft["subject"]])
 
 
-def send_approved(do_send: bool = False, log=print) -> dict:
+def send_approved(do_send: bool = False, log=print, html_map: dict | None = None) -> dict:
     """Send (or, if do_send=False, preview) all drafts marked `approved`.
 
     Returns a summary dict. Raises PipelineError for user-facing failures.
     Shared by the CLI (`run`) and the web UI.
+
+    html_map: optional {slug: html} of React Email-rendered bodies, keyed by the
+    draft's filename stem. When present, each email carries that HTML as its
+    rich alternative part (plain text stays as the fallback).
     """
+    html_map = html_map or {}
     cfg = load_config()
     secrets = load_secrets()
 
@@ -186,7 +195,8 @@ def send_approved(do_send: bool = False, log=print) -> dict:
                 )
 
             for i, d in enumerate(approved):
-                msg = _build_message(sender, sender_name, d, resume, fixed_sig)
+                html = html_map.get(d["_file"].stem)
+                msg = _build_message(sender, sender_name, d, resume, fixed_sig, html=html)
                 try:
                     server.send_message(msg)
                 except Exception as e:

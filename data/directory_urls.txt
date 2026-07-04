@@ -1,10 +1,1 @@
-# Faculty-directory URLs, one per line. Lines starting with # are ignored.
-# You'll normally edit these on the Setup page in the app, but you can edit here too.
-#
-# https://www.cs.someuniversity.edu/people/faculty
-# https://eecs.someuniversity.edu/people/postdoctoral-researchers
-
-# Caltech
-https://cce.caltech.edu/people
-https://www.bbe.caltech.edu/people/faculty
-
+# Faculty-directory URLs, one per line.

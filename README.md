@@ -17,18 +17,44 @@ and a per-run cap so accounts don't get flagged for spam.
 
 ## Run it (local web app)
 
+There are two frontends over the **same Python pipeline**:
+
+### New UI — Next.js + shadcn/ui + React Email (recommended)
+
+A polished React app (Tailwind + shadcn/ui) whose "compose" preview renders the
+**real email HTML** with React Email. It talks to the Python pipeline through a
+local API, and still sends from your own Gmail.
+
+```bash
+pip install -r requirements.txt   # Python pipeline
+cd web && npm install && cd ..    # UI dependencies (first time only)
+python run_web.py                 # builds the UI, starts both processes
+```
+
+Opens at <http://127.0.0.1:3000>. It runs two local processes — the Flask
+pipeline API on `:5000` and the Next.js UI on `:3000`, which proxies `/py/*` to
+Flask (no CORS to configure). For iterative UI work, run `cd web && npm run dev`
+alongside `python run_app.py` instead.
+
+### Classic UI — server-rendered (no Node required)
+
 ```bash
 pip install -r requirements.txt
 python run_app.py          # or double-click start.bat on Windows
 ```
 
-Opens at <http://127.0.0.1:5000>. Everything runs only on your own machine —
-your resume, Gmail credentials, and scraped data never leave it.
+Opens at <http://127.0.0.1:5000>.
 
-1. Fill in the **Setup** tab: your info, your Gmail + App Password, resume, and
-   the organizations/URLs to scrape (or use the web-search discovery box).
-2. Work left to right: **Scrape** → **Contacts** → **Generate drafts** →
-   review/approve → **Send**.
+Either way, everything runs only on your own machine — your resume, Gmail
+credentials, and scraped data never leave it.
+
+1. Fill in the **Setup** tab: your info, your Gmail + App Password, and resume.
+2. On the **Find** tab, search **Academia** or **Industry** for a field (or paste
+   specific URLs/org names). Contacts are scraped and tagged by category.
+3. Work left to right: **Setup** → **Find** → **Contacts** (review/filter by
+   Academia/Industry) → **Generate drafts** → review/approve → **Send**.
+
+The classic UI keeps discovery on the Setup page; the flow is otherwise the same.
 
 Before first run, copy `.env.example` to `.env` and set your API credentials
 (`ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` if you use a gateway).
@@ -62,10 +88,15 @@ you can mix them.
 ## Layout
 | Path | What |
 |------|------|
-| `run_app.py` / `start.bat` | launch the web app in a browser |
-| `src/app.py` | the web server + routes |
-| `src/templates`, `src/static` | the UI (HTML/CSS/JS) |
-| `src/scrape.py` `draft.py` `send.py` | the pipeline (shared by UI + CLI) |
+| `run_web.py` | launch the new Next.js UI + Python API together |
+| `run_app.py` / `start.bat` | launch the classic server-rendered UI |
+| `src/app.py` | Flask server — classic routes **and** the `/api/*` JSON API |
+| `src/templates`, `src/static` | the classic UI (HTML/CSS/JS) |
+| `web/` | the Next.js + shadcn/ui frontend |
+| `web/src/app/{setup,find,contacts,drafts}` | the pages (Find = Academia/Industry search) |
+| `web/emails/outreach.tsx` | the React Email template (real send HTML) |
+| `web/next.config.ts` | proxies `/py/*` → Flask `:5000/api/*` |
+| `src/scrape.py` `draft.py` `send.py` | the pipeline (shared by both UIs + CLI) |
 | `src/cli.py` | command-line entry point |
 | `config.yaml` | model, paths, rate limits |
 | `.env` | API key + Gmail creds (gitignored) |
