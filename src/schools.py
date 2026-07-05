@@ -15,6 +15,9 @@ from __future__ import annotations
 import difflib
 import json
 import re
+import time
+
+from .config import PipelineError
 
 # ── Built-in lookup table ──────────────────────────────────────────────────────
 # Single source of truth: canonical name → URLs.
@@ -230,7 +233,7 @@ relevant first."""
 _DISCOVER_TOOL = {
     "type": "web_search_20260209",
     "name": "web_search",
-    "max_uses": 6,
+    "max_uses": 8,
 }
 
 _DISCOVER_PROMPT = """\
@@ -278,6 +281,8 @@ def discover_orgs(query: str, client, model: str, log=print, kind: str = "indust
     kind="industry" finds biotech/pharma companies; kind="academia" finds
     universities/departments. Returns researcher-directory URLs for the scraper.
     """
+    import anthropic
+
     where = "universities/institutions" if kind == "academia" else "organizations"
     log(f"Searching for {where} in: {query}...")
     template = _DISCOVER_PROMPT_ACADEMIA if kind == "academia" else _DISCOVER_PROMPT
@@ -289,6 +294,8 @@ def discover_orgs(query: str, client, model: str, log=print, kind: str = "indust
                 model=model,
                 max_tokens=2000,
                 tools=[_DISCOVER_TOOL],
+                output_config={"effort": "low"},
+                cache_control={"type": "ephemeral"},
                 messages=messages,
             )
             if resp.stop_reason == "pause_turn":
@@ -296,6 +303,21 @@ def discover_orgs(query: str, client, model: str, log=print, kind: str = "indust
                 continue
             break
         text = "\n".join(b.text for b in resp.content if b.type == "text").strip()
+    except anthropic.APIConnectionError as e:
+        raise PipelineError(
+            "Couldn't reach the AI endpoint (connection error). Check your "
+            "network/VPN and ANTHROPIC_BASE_URL in .env, then search again."
+        ) from e
+    except anthropic.AuthenticationError as e:
+        raise PipelineError(
+            "The AI endpoint rejected the credential (401). "
+            "Check ANTHROPIC_API_KEY in .env."
+        ) from e
+    except anthropic.APIStatusError as e:
+        raise PipelineError(
+            f"The AI endpoint returned an error ({e.status_code}). "
+            "Try again in a minute."
+        ) from e
     except Exception as e:
         log(f"Discovery search failed: {e}")
         return []
@@ -420,23 +442,56 @@ summary; leave the contact_* fields "" when you cannot find a person."""
 
 def _finder_search(prompt: str, schema: dict, client, model: str, log,
                    effort: str = "medium") -> dict:
-    """Run a web-search agent turn (handling pause_turn) and parse its JSON result."""
+    """Run a web-search agent turn (handling pause_turn) and parse its JSON result.
+
+    Raises PipelineError on connection/auth failures so the UI shows the real
+    problem instead of a misleading "nothing found".
+    """
+    import anthropic
+
     messages = [{"role": "user", "content": prompt}]
     resp = None
     for i in range(8):
         if i:
             # Heartbeat so the job bar shows life during the (slow) web browsing.
             log(f"  · still searching the web… (round {i + 1})")
-        resp = client.messages.create(
-            model=model,
-            max_tokens=16000,
-            tools=[_FINDER_TOOL],
-            output_config={
-                "effort": effort,
-                "format": {"type": "json_schema", "schema": schema},
-            },
-            messages=messages,
-        )
+        # The SDK already retries connection errors twice; one extra round here
+        # rides out a longer network/VPN blip mid-search instead of losing the job.
+        for attempt in (1, 2):
+            try:
+                resp = client.messages.create(
+                    model=model,
+                    max_tokens=16000,
+                    tools=[_FINDER_TOOL],
+                    output_config={
+                        "effort": effort,
+                        "format": {"type": "json_schema", "schema": schema},
+                    },
+                    # Each pause_turn round re-sends the growing conversation;
+                    # caching the prefix keeps later rounds cheap.
+                    cache_control={"type": "ephemeral"},
+                    messages=messages,
+                )
+                break
+            except anthropic.APIConnectionError as e:
+                if attempt == 1:
+                    log("  · connection hiccup — retrying in 5s…")
+                    time.sleep(5)
+                    continue
+                raise PipelineError(
+                    "Couldn't reach the AI endpoint (connection error). Check your "
+                    "network/VPN and ANTHROPIC_BASE_URL in .env, then search again."
+                ) from e
+            except anthropic.AuthenticationError as e:
+                raise PipelineError(
+                    "The AI endpoint rejected the credential (401). "
+                    "Check ANTHROPIC_API_KEY in .env."
+                ) from e
+            except anthropic.APIStatusError as e:
+                raise PipelineError(
+                    f"The AI endpoint returned an error ({e.status_code}). "
+                    "Try again in a minute."
+                ) from e
         if resp.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": resp.content})
             continue
@@ -448,7 +503,12 @@ def _finder_search(prompt: str, schema: dict, client, model: str, log,
         return json.loads(text)
     except (ValueError, json.JSONDecodeError):
         match = re.search(r"\{.*\}", text, re.DOTALL)
-        return json.loads(match.group(0)) if match else {}
+        if not match:
+            return {}
+        try:
+            return json.loads(match.group(0))
+        except (ValueError, json.JSONDecodeError):
+            return {}
 
 
 def _exclude_clause(exclude: list[str] | None) -> str:
@@ -474,6 +534,8 @@ def find_academics(query: str, client, model: str, log=print, count: int = 10,
     try:
         prompt = _PEOPLE_PROMPT.format(query=query, count=count) + _exclude_clause(exclude)
         data = _finder_search(prompt, _PEOPLE_SCHEMA, client, model, log, effort=effort)
+    except PipelineError:
+        raise  # real cause (connection/auth) — surface it, don't blame the query
     except Exception as e:
         log(f"Researcher search failed: {e}")
         return []
@@ -509,6 +571,8 @@ def find_academics(query: str, client, model: str, log=print, count: int = 10,
                         r["name"], domain, client=client, model=model,
                         affiliation=r["affiliation"], log=log,
                     )
+                except PipelineError:
+                    raise  # gateway/auth failure — surface it, don't swallow per-contact
                 except Exception as e:
                     log(f"  ({r['name']}: email lookup error: {e})")
                     continue
@@ -526,6 +590,8 @@ def find_jobs(query: str, client, model: str, log=print, count: int = 10,
     try:
         prompt = _JOBS_PROMPT.format(query=query, count=count) + _exclude_clause(exclude)
         data = _finder_search(prompt, _JOBS_SCHEMA, client, model, log, effort=effort)
+    except PipelineError:
+        raise  # real cause (connection/auth) — surface it, don't blame the query
     except Exception as e:
         log(f"Job search failed: {e}")
         return []
@@ -572,6 +638,8 @@ def resolve_school(name: str, client, model: str, log=print) -> list[str]:
 
     # 2. Web-search fallback
     log(f"  {name}: not in lookup table — searching the web...")
+    import anthropic
+
     try:
         resp = client.messages.create(
             model=model,
@@ -591,6 +659,21 @@ def resolve_school(name: str, client, model: str, log=print) -> list[str]:
         else:
             log(f"  {name}: web search returned no URLs — skipping")
         return urls
+    except anthropic.APIConnectionError as exc:
+        raise PipelineError(
+            "Couldn't reach the AI endpoint (connection error). Check your "
+            "network/VPN and ANTHROPIC_BASE_URL in .env, then try again."
+        ) from exc
+    except anthropic.AuthenticationError as exc:
+        raise PipelineError(
+            "The AI endpoint rejected the credential (401). "
+            "Check ANTHROPIC_API_KEY in .env."
+        ) from exc
+    except anthropic.APIStatusError as exc:
+        raise PipelineError(
+            f"The AI endpoint returned an error ({exc.status_code}). "
+            "Try again in a minute."
+        ) from exc
     except Exception as exc:
         log(f"  {name}: web search error ({exc}) — skipping")
         return []

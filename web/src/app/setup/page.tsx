@@ -1,10 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import {
+  Children,
+  cloneElement,
+  isValidElement,
+  useCallback,
+  useEffect,
+  useId,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ArrowRight, Loader2, TriangleAlert } from "lucide-react";
 import { api, type SetupState } from "@/lib/api";
+import { BackendDownBanner } from "@/components/backend-down";
 import { ResumeUpload } from "@/components/resume-upload";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +45,7 @@ const EMPTY: SetupState = {
   phone: "",
   gmail_address: "",
   gmail_app_password: "",
+  gmail_app_password_set: false,
   schools: "",
   resume_ok: false,
   resume_name: "",
@@ -59,12 +69,26 @@ function Toggle({
   title: string;
   hint: string;
 }) {
+  const id = useId();
   return (
     <div className="flex items-start gap-3 py-1">
-      <Switch checked={checked} onCheckedChange={onChange} className="mt-0.5" />
+      <Switch
+        checked={checked}
+        onCheckedChange={onChange}
+        aria-labelledby={`${id}-title`}
+        aria-describedby={`${id}-hint`}
+        className="mt-0.5"
+      />
       <div className="space-y-1">
-        <p className="text-sm font-medium leading-none">{title}</p>
-        <p className="text-[13px] leading-snug text-muted-foreground">{hint}</p>
+        <p id={`${id}-title`} className="text-sm font-medium leading-none">
+          {title}
+        </p>
+        <p
+          id={`${id}-hint`}
+          className="text-[13px] leading-snug text-muted-foreground"
+        >
+          {hint}
+        </p>
       </div>
     </div>
   );
@@ -74,17 +98,29 @@ export default function SetupPage() {
   const router = useRouter();
   const [s, setS] = useState<SetupState | null>(null);
   const [saving, setSaving] = useState(false);
+  const [backendDown, setBackendDown] = useState(false);
+
+  const load = useCallback(() => {
+    setBackendDown(false);
+    api
+      .getState()
+      .then(setS)
+      .catch((e) => {
+        if ((e as Error).name === "BackendDown") setBackendDown(true);
+        else toast.error(String((e as Error).message ?? e));
+      });
+  }, []);
 
   useEffect(() => {
-    api.getState().then(setS).catch((e) => toast.error(String(e.message ?? e)));
-  }, []);
+    load();
+  }, [load]);
 
   const st = s ?? EMPTY;
   const set = (patch: Partial<SetupState>) => setS({ ...st, ...patch });
   const setField = (k: keyof SetupState["fields"], v: string) =>
     setS({ ...st, fields: { ...st.fields, [k]: v } });
 
-  async function save() {
+  async function save(): Promise<boolean> {
     setSaving(true);
     try {
       await api.saveSettings({
@@ -92,13 +128,19 @@ export default function SetupPage() {
         name: st.name,
         phone: st.phone,
         gmail_address: st.gmail_address,
-        gmail_app_password: st.gmail_app_password,
+        // The saved password never round-trips through /py/state, so only
+        // send one if the user actually typed a replacement.
+        ...(st.gmail_app_password
+          ? { gmail_app_password: st.gmail_app_password }
+          : {}),
         web_research: st.web_research,
         quality_review: st.quality_review,
       });
       toast.success("Settings saved.");
+      return true;
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -114,6 +156,9 @@ export default function SetupPage() {
   }
 
   if (!s) {
+    if (backendDown) {
+      return <BackendDownBanner onRetry={load} />;
+    }
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -229,7 +274,11 @@ export default function SetupPage() {
               <Input
                 type="password"
                 value={st.gmail_app_password}
-                placeholder="16-character app password"
+                placeholder={
+                  st.gmail_app_password_set
+                    ? "•••••••• (saved)"
+                    : "16-character app password"
+                }
                 onChange={(e) => set({ gmail_app_password: e.target.value })}
               />
             </Field>
@@ -316,13 +365,19 @@ export default function SetupPage() {
       </div>
 
       {/* Next steps */}
-      <Card className="border-brand/30">
+      <Card className="ring-brand/30">
         <CardHeader>
           <p className="eyebrow">Next</p>
           <CardTitle className="sr-only">Next</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap items-center gap-3">
-          <Button onClick={() => router.push("/find")}>
+          <Button
+            disabled={saving}
+            onClick={async () => {
+              // Save any unsaved edits first; stay put if the save fails.
+              if (await save()) router.push("/find");
+            }}
+          >
             <ArrowRight className="size-4" />
             Find contacts
           </Button>
@@ -334,7 +389,7 @@ export default function SetupPage() {
       </Card>
 
       {/* Danger zone */}
-      <Card className="border-destructive/30 bg-destructive/[0.03]">
+      <Card className="ring-destructive/30 bg-destructive/[0.03]">
         <CardHeader>
           <p className="eyebrow text-destructive">Reset data</p>
           <CardDescription>
@@ -366,10 +421,21 @@ function Field({
   label: string;
   children: React.ReactNode;
 }) {
+  const id = useId();
+  // Wire the label to the first element child (the Input/Textarea) so the
+  // control has an accessible name.
+  let wired = false;
+  const kids = Children.map(children, (child) => {
+    if (wired || !isValidElement(child)) return child;
+    wired = true;
+    return cloneElement(child as React.ReactElement<{ id?: string }>, { id });
+  });
   return (
     <div className="space-y-2">
-      <Label className="text-[13px] font-medium">{label}</Label>
-      {children}
+      <Label htmlFor={id} className="text-[13px] font-medium">
+        {label}
+      </Label>
+      {kids}
     </div>
   );
 }

@@ -35,6 +35,7 @@ export function SiteHeader() {
               <Link
                 key={item.href}
                 href={item.href}
+                aria-current={active ? "page" : undefined}
                 className={cn(
                   "group flex items-baseline gap-1.5 border-b-2 border-transparent pb-3.5 pt-4 text-sm font-medium transition-colors",
                   active

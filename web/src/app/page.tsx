@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   ArrowRight,
@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { api, type Contact, type SentEmail } from "@/lib/api";
 import { PIPELINE_DONE } from "@/components/job-bar";
+import { BackendDownBanner } from "@/components/backend-down";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -28,29 +29,39 @@ type Data = {
 
 export default function HomePage() {
   const [d, setD] = useState<Data | null>(null);
+  const [down, setDown] = useState(false);
+
+  const load = useCallback(() => {
+    Promise.all([api.getState(), api.getContacts(), api.getDrafts(), api.getSent()])
+      .then(([s, c, dr, se]) => {
+        setDown(false);
+        setD({
+          contacts: c.rows,
+          counts: dr.counts,
+          sent: se.rows,
+          ready: {
+            name: !!s.name.trim(),
+            gmail: !!s.gmail_address.trim() && s.gmail_app_password_set,
+            resume: s.resume_ok,
+            apiKey: s.api_key_ok,
+          },
+        });
+      })
+      .catch((e) => {
+        if ((e as Error).name === "BackendDown") setDown(true);
+        else setD({ contacts: [], counts: {}, sent: [], ready: { name: false, gmail: false, resume: false, apiKey: false } });
+      });
+  }, []);
 
   useEffect(() => {
-    const load = () => {
-      Promise.all([api.getState(), api.getContacts(), api.getDrafts(), api.getSent()])
-        .then(([s, c, dr, se]) =>
-          setD({
-            contacts: c.rows,
-            counts: dr.counts,
-            sent: se.rows,
-            ready: {
-              name: !!s.name.trim(),
-              gmail: !!s.gmail_address.trim() && !!s.gmail_app_password.trim(),
-              resume: s.resume_ok,
-              apiKey: s.api_key_ok,
-            },
-          }),
-        )
-        .catch(() => setD({ contacts: [], counts: {}, sent: [], ready: { name: false, gmail: false, resume: false, apiKey: false } }));
-    };
     load();
     window.addEventListener(PIPELINE_DONE, load);
     return () => window.removeEventListener(PIPELINE_DONE, load);
-  }, []);
+  }, [load]);
+
+  if (down) {
+    return <BackendDownBanner onRetry={load} />;
+  }
 
   if (!d) {
     return (
@@ -138,7 +149,7 @@ export default function HomePage() {
       </div>
 
       {/* Next step */}
-      <Card className="border-brand/30">
+      <Card className="ring-brand/30">
         <CardContent className="flex flex-wrap items-center justify-between gap-4 py-5">
           <div>
             <p className="eyebrow">Next step</p>
@@ -180,7 +191,7 @@ function StatTile({
 }) {
   return (
     <Link href={href}>
-      <Card className="transition-colors hover:border-brand/40">
+      <Card className="transition-all hover:-translate-y-0.5 hover:ring-brand/40">
         <CardContent className="py-5">
           <div className="flex items-center gap-2 text-muted-foreground">
             {icon}

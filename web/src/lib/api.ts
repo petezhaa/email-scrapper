@@ -44,7 +44,8 @@ export type SetupState = {
   name: string;
   phone: string;
   gmail_address: string;
-  gmail_app_password: string;
+  gmail_app_password: string; // always "" from the server; see gmail_app_password_set
+  gmail_app_password_set: boolean;
   schools: string;
   resume_ok: boolean;
   resume_name: string;
@@ -74,11 +75,21 @@ export type JobsResponse = {
 };
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/py/${path}`, {
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    ...init,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/py/${path}`, {
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      ...init,
+    });
+  } catch {
+    // fetch itself rejected: network error, i.e. the local backend is down.
+    // Pages check error.name === "BackendDown" to tell this apart from a
+    // normal API error or genuinely empty data.
+    const err = new Error("Can't reach the local backend");
+    err.name = "BackendDown";
+    throw err;
+  }
   if (!res.ok) {
     let detail = "";
     try {
@@ -117,7 +128,10 @@ export const api = {
 
   getSent: () => j<{ rows: SentEmail[] }>("sent"),
   followUp: (c: { to: string; name?: string; subject?: string }) =>
-    j<{ job_id: string }>("run/follow-up", { method: "POST", body: JSON.stringify(c) }),
+    j<{ job_id: string; already_running?: boolean }>("run/follow-up", {
+      method: "POST",
+      body: JSON.stringify(c),
+    }),
 
   getDrafts: () => j<{ items: Draft[]; counts: Record<string, number> }>("drafts"),
   saveDraft: (d: Omit<Draft, "status"> & { status: string }) =>
@@ -128,25 +142,30 @@ export const api = {
   resetContacts: () => j("reset/contacts", { method: "POST" }),
   resetDrafts: () => j("reset/drafts", { method: "POST" }),
 
+  // already_running=true means an identical job was in flight and nothing
+  // new was started.
   runDiscover: (query: string, category: ContactCategory, findEmails = false) =>
-    j<{ job_id: string }>("run/discover", {
+    j<{ job_id: string; already_running?: boolean }>("run/discover", {
       method: "POST",
       body: JSON.stringify({ query, category, find_emails: findEmails }),
     }),
   runScrape: (category: ContactCategory) =>
-    j<{ job_id: string }>("run/scrape", {
+    j<{ job_id: string; already_running?: boolean }>("run/scrape", {
       method: "POST",
       body: JSON.stringify({ category }),
     }),
-  runDraft: () => j<{ job_id: string }>("run/draft", { method: "POST" }),
+  runDraft: () =>
+    j<{ job_id: string; already_running?: boolean }>("run/draft", {
+      method: "POST",
+    }),
   draftOne: (c: { email?: string; profile_url?: string; name?: string }) =>
-    j<{ job_id: string }>("run/draft-one", {
+    j<{ job_id: string; already_running?: boolean }>("run/draft-one", {
       method: "POST",
       body: JSON.stringify(c),
     }),
   // send is triggered through the Next route (renders React Email first)
   startSend: (html_map: Record<string, string>) =>
-    j<{ job_id: string }>("run/send", {
+    j<{ job_id: string; already_running?: boolean }>("run/send", {
       method: "POST",
       body: JSON.stringify({ html_map }),
     }),
@@ -171,7 +190,14 @@ export async function previewEmail(input: {
 
 export async function sendApproved(): Promise<{ job_id: string; count: number }> {
   const res = await fetch("/api/send", { method: "POST" });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error || "Send failed to start");
-  return data;
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.json())?.error ?? "";
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(detail || "Send failed to start");
+  }
+  return res.json();
 }

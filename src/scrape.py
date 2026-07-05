@@ -13,11 +13,13 @@ from __future__ import annotations
 import csv
 import json
 import re
+import threading
 import time
 import urllib.robotparser as robotparser
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+import anthropic
 import requests
 from bs4 import BeautifulSoup
 
@@ -30,6 +32,11 @@ USER_AGENT = (
 )
 
 CSV_FIELDS = ["name", "email", "title", "affiliation", "research_interests", "profile_url", "source_url", "category"]
+
+# Serializes every read/write of targets.csv — a scrape job and the Contacts
+# page (edits/deletes) can touch the file concurrently. Other modules that
+# touch targets.csv import this lock from src.scrape.
+TARGETS_LOCK = threading.RLock()
 
 # JSON schema Claude must conform to when extracting people from a page.
 EXTRACT_SCHEMA = {
@@ -91,6 +98,14 @@ _GENERIC_LOCALS = {
 }
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
+# Title fragments that mark non-research or no-longer-active roles. Matched
+# case-insensitively against the title; "emerit" covers emeritus and emerita.
+_NON_RESEARCH_TITLES = (
+    "lecturer", "instructor", "teaching professor", "adjunct",
+    "visiting lecturer", "senior lecturer", "clinical",
+    "emerit", "retired", "former",
+)
+
 
 def _pick_email(page_text: str, name: str) -> str:
     """Find the most likely personal email on a fetched profile page."""
@@ -104,14 +119,43 @@ def _pick_email(page_text: str, name: str) -> str:
     if not found:
         return ""
     name_parts = [p.lower() for p in re.split(r"\s+", name.strip()) if len(p) > 1]
-    # Prefer an address whose local-part contains any part of the person's name.
+    # Prefer an address whose local-part matches the person's name on TOKEN
+    # boundaries (local part split on . _ - and digits). A name part must equal
+    # a whole token, be abbreviated by an initial-style token ("d" for "doe"),
+    # or form a first-initial+name token ("jdoe") — substring hits like surname
+    # "Li" inside "julian@..." no longer count.
+    first_initial = name_parts[0][0] if name_parts else ""
     for e in found:
-        local = e.split("@")[0]
-        if any(part in local for part in name_parts):
-            return e
+        tokens = [t for t in re.split(r"[._\-\d]+", e.split("@")[0]) if t]
+        for part in name_parts:
+            if any(t == part or part.startswith(t) or t == first_initial + part
+                   for t in tokens):
+                return e
     # Don't fall back to an unrelated address — it would block every other person
     # who shares the same page-level department contact email.
     return "" if name_parts else found[0]
+
+
+def _pipeline_error_from(e: Exception) -> PipelineError:
+    """Map an Anthropic SDK failure to a user-facing PipelineError.
+
+    Mirrors schools._finder_search — AuthenticationError is checked before
+    APIStatusError (its parent class).
+    """
+    if isinstance(e, anthropic.APIConnectionError):
+        return PipelineError(
+            "Couldn't reach the AI endpoint (connection error). Check your "
+            "network/VPN and ANTHROPIC_BASE_URL in .env, then run again."
+        )
+    if isinstance(e, anthropic.AuthenticationError):
+        return PipelineError(
+            "The AI endpoint rejected the credential (401). "
+            "Check ANTHROPIC_API_KEY in .env."
+        )
+    return PipelineError(
+        f"The AI endpoint returned an error ({e.status_code}). "
+        "Try again in a minute."
+    )
 
 
 def _check_robots(url: str) -> bool:
@@ -250,12 +294,34 @@ FIELD_FILTER_SCHEMA = {
     "additionalProperties": False,
 }
 
-FIELD_FILTER_PROMPT = """Filter this researcher for a chemistry M.S. graduate (biophysical \
+# One results entry per numbered contact in a batched filter call.
+FIELD_FILTER_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "keep": {"type": "boolean"},
+                },
+                "required": ["index", "keep"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["results"],
+    "additionalProperties": False,
+}
+
+# Shared rubric (~400 tokens) — sent once per batch instead of once per person.
+_FIELD_FILTER_RUBRIC = """Filter researchers for a chemistry M.S. graduate (biophysical \
 chemistry focus) seeking a full-time research scientist role in industry or academia. \
 Keep only contacts whose work involves experimental chemistry — spectroscopic, structural, \
 or wet-lab techniques applied to molecular problems.
 
-KEEP (is_match = true):
+KEEP:
 - Drug discovery / medicinal chemistry: target engagement, biophysical characterization \
 of drug-protein interactions, structural biology for drug design
 - Biophysical characterization: NMR, cryo-EM, X-ray crystallography, HDX-MS, native MS, \
@@ -268,19 +334,29 @@ surface functionalization studied with spectroscopic tools
 - Computational chemistry with experimental validation: MD, free energy calculations \
 paired with wet-lab work
 
-FILTER OUT (is_match = false):
+FILTER OUT:
 - Pure software / ML / AI roles with no wet-lab chemistry
 - Clinical, medical, or patient-facing roles
 - Pure genomics, transcriptomics, or sequencing-based biology
 - Business development, sales, or commercial roles
 - Operations, manufacturing, or QC/QA without research component
-- Purely theoretical or computational roles with no experimental component
+- Purely theoretical or computational roles with no experimental component"""
+
+FIELD_FILTER_PROMPT = _FIELD_FILTER_RUBRIC + """
 
 Researcher: {name}
 Title: {title}
 Research interests: {research_interests}
 
 Respond with is_match (true/false) and a one-sentence reason."""
+
+FIELD_FILTER_BATCH_PROMPT = _FIELD_FILTER_RUBRIC + """
+
+Below is a numbered list of researchers. Apply the rubric to EACH one and return
+a `results` array with one {{"index": <number shown>, "keep": true/false}} entry
+per researcher. Include every index exactly once.
+
+{contacts}"""
 
 
 def _check_research_fit(client, model: str, name: str, title: str, interests: str) -> tuple[bool, str]:
@@ -306,6 +382,50 @@ def _check_research_fit(client, model: str, name: str, title: str, interests: st
         return bool(data.get("is_match", True)), (data.get("reason") or "")
     except Exception as e:
         return True, f"filter error ({e}) — keeping"
+
+
+# Contacts per research-fit call — one rubric per batch instead of per person.
+_FILTER_BATCH_SIZE = 25
+
+
+def _check_research_fit_batch(client, model: str, contacts: list[dict]) -> list[bool]:
+    """Batched _check_research_fit: up to 25 contacts per call as a numbered list.
+
+    Returns one keep-decision per contact (aligned with `contacts`). Falls back
+    to the single-contact path for a chunk when the batch call fails or the
+    result can't be parsed/aligned.
+    """
+    keep: list[bool] = []
+    for start in range(0, len(contacts), _FILTER_BATCH_SIZE):
+        chunk = contacts[start:start + _FILTER_BATCH_SIZE]
+        decisions: list[bool] | None = None
+        try:
+            listing = "\n".join(
+                f"{i + 1}. {c['name'] or '(unknown)'} — Title: {c['title'] or '(none)'} — "
+                f"Research interests: {c['interests'] or '(none listed)'}"
+                for i, c in enumerate(chunk)
+            )
+            resp = client.messages.create(
+                model=model,
+                max_tokens=2000,
+                output_config={
+                    "effort": "low",
+                    "format": {"type": "json_schema", "schema": FIELD_FILTER_BATCH_SCHEMA},
+                },
+                messages=[{"role": "user", "content": FIELD_FILTER_BATCH_PROMPT.format(contacts=listing)}],
+            )
+            text = next((b.text for b in resp.content if b.type == "text"), "")
+            got = {int(r["index"]): bool(r["keep"]) for r in json.loads(text).get("results") or []}
+            decisions = [got[i + 1] for i in range(len(chunk))]  # KeyError → fallback
+        except Exception:
+            decisions = None
+        if decisions is None:
+            decisions = [
+                _check_research_fit(client, model, c["name"], c["title"], c["interests"])[0]
+                for c in chunk
+            ]
+        keep.extend(decisions)
+    return keep
 
 
 # ── Personal research-website finder ────────────────────────────────────────
@@ -359,14 +479,15 @@ PROFILE_SCHEMA = {
         "is_real_person": {"type": "boolean"},
         "email": {"type": "string"},
         "research_interests": {"type": "string"},
+        "title": {"type": "string"},
     },
-    "required": ["is_real_person", "email", "research_interests"],
+    "required": ["is_real_person", "email", "research_interests", "title"],
     "additionalProperties": False,
 }
 
 PROFILE_PROMPT = """You are analyzing a researcher's profile or lab website page.
 
-Answer three questions:
+Answer four questions:
 1. is_real_person — true if this page is for a single real individual (faculty, postdoc,
    researcher, lecturer, scientist). Set false if it belongs to a lab group, department,
    program, or other collective entity.
@@ -381,6 +502,8 @@ Answer three questions:
 3. research_interests — a concise summary (1-3 sentences or comma-separated list) of the
    person's research focus, techniques, and biological questions. Pull from the "Research",
    "About", or "Overview" section. Use "" if nothing is available.
+4. title — the person's current position/title as shown on the page (e.g. "Associate
+   Professor", "Professor Emeritus", "Research Scientist"). Use "" if no title is shown.
 
 PAGE TEXT:
 ---
@@ -389,7 +512,8 @@ PAGE TEXT:
 
 
 def _analyze_profile(client, model: str, page_text: str) -> dict:
-    """AI-analyze a profile page: verify it's a real person, find email, extract research."""
+    """AI-analyze a profile page: verify it's a real person, find email, extract
+    research interests + title."""
     page_text = page_text[:60_000]
     resp = client.messages.create(
         model=model,
@@ -406,6 +530,7 @@ def _analyze_profile(client, model: str, page_text: str) -> dict:
         "is_real_person": bool(data.get("is_real_person", True)),
         "email": (data.get("email") or "").strip().lower(),
         "research_interests": (data.get("research_interests") or "").strip(),
+        "title": (data.get("title") or "").strip(),
     }
 
 
@@ -426,23 +551,36 @@ def _extract_people(client, model: str, effort: str, page_text: str) -> list[dic
     return data.get("people", [])
 
 
+def _norm_profile(url: str) -> str:
+    """Normalize a profile URL for dedup: lowercase scheme+host, strip trailing slash."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    p = urlparse(url)
+    if p.scheme and p.netloc:
+        rest = p.path + (f"?{p.query}" if p.query else "")
+        url = f"{p.scheme.lower()}://{p.netloc.lower()}{rest}"
+    return url.rstrip("/") or url
+
+
 def _migrate_targets(targets_path: Path) -> None:
     """Add the `category` column to a pre-existing targets.csv (default research),
     so appends stay column-aligned."""
-    if not targets_path.exists():
-        return
-    with targets_path.open("r", encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh)
-        existing_fields = reader.fieldnames or []
-        if "category" in existing_fields:
+    with TARGETS_LOCK:
+        if not targets_path.exists():
             return
-        legacy_rows = list(reader)
-    with targets_path.open("w", encoding="utf-8", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
-        w.writeheader()
-        for r in legacy_rows:
-            r.setdefault("category", "research")
-            w.writerow({k: r.get(k, "") for k in CSV_FIELDS})
+        with targets_path.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            existing_fields = reader.fieldnames or []
+            if "category" in existing_fields:
+                return
+            legacy_rows = list(reader)
+        with targets_path.open("w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            w.writeheader()
+            for r in legacy_rows:
+                r.setdefault("category", "research")
+                w.writerow({k: r.get(k, "") for k in CSV_FIELDS})
 
 
 def save_contacts(rows: list[dict], category: str = "research", log=print) -> int:
@@ -456,51 +594,93 @@ def save_contacts(rows: list[dict], category: str = "research", log=print) -> in
     targets_path.parent.mkdir(parents=True, exist_ok=True)
     _migrate_targets(targets_path)
 
-    seen_emails, seen_profiles = _load_existing(targets_path)
-    write_header = not targets_path.exists()
     added = 0
-    with targets_path.open("a", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
-        if write_header:
-            writer.writeheader()
-        for r in rows:
-            email = (r.get("email") or "").strip().lower()
-            profile = (r.get("profile_url") or "").strip()
-            has_email = bool(email and "@" in email)
-            if not has_email and not profile:
-                continue
-            if has_email and email in seen_emails:
-                continue
-            if not has_email and profile in seen_profiles:
-                continue
-            row = {k: (r.get(k) or "") for k in CSV_FIELDS}
-            row["email"] = email
-            row["category"] = category
-            writer.writerow(row)
-            fh.flush()  # visible to the Contacts page immediately
-            if has_email:
-                seen_emails.add(email)
-            if profile:
-                seen_profiles.add(profile)
-            added += 1
+    with TARGETS_LOCK:
+        seen_emails, seen_profiles = _load_existing(targets_path)
+        write_header = not targets_path.exists()
+        with targets_path.open("a", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            if write_header:
+                writer.writeheader()
+            for r in rows:
+                email = (r.get("email") or "").strip().lower()
+                profile = (r.get("profile_url") or "").strip()
+                norm_profile = _norm_profile(profile)
+                has_email = bool(email and "@" in email)
+                if not has_email and not profile:
+                    continue
+                if has_email and email in seen_emails:
+                    continue
+                if not has_email and norm_profile in seen_profiles:
+                    continue
+                row = {k: (r.get(k) or "") for k in CSV_FIELDS}
+                row["email"] = email
+                row["category"] = category
+                writer.writerow(row)
+                fh.flush()  # visible to the Contacts page immediately
+                if has_email:
+                    seen_emails.add(email)
+                if norm_profile:
+                    seen_profiles.add(norm_profile)
+                added += 1
     return added
 
 
 def _load_existing(targets_path: Path) -> tuple[set[str], set[str]]:
-    """Return (seen_emails, seen_profile_urls) for deduplication."""
-    if not targets_path.exists():
-        return set(), set()
+    """Return (seen_emails, seen_profile_urls) for deduplication.
+    Profile URLs are normalized with _norm_profile."""
     emails: set[str] = set()
     profiles: set[str] = set()
-    with targets_path.open("r", encoding="utf-8", newline="") as f:
-        for row in csv.DictReader(f):
-            e = (row.get("email") or "").strip().lower()
-            p = (row.get("profile_url") or "").strip()
-            if e:
-                emails.add(e)
-            if p:
-                profiles.add(p)
+    with TARGETS_LOCK:
+        if not targets_path.exists():
+            return emails, profiles
+        with targets_path.open("r", encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                e = (row.get("email") or "").strip().lower()
+                p = _norm_profile(row.get("profile_url") or "")
+                if e:
+                    emails.add(e)
+                if p:
+                    profiles.add(p)
     return emails, profiles
+
+
+def _fill_email(targets_path: Path, norm_profile: str, email: str) -> bool:
+    """Fill `email` into an existing email-less row whose profile_url matches
+    `norm_profile` (rewrites targets.csv in place). Returns True if a row changed."""
+    with TARGETS_LOCK:
+        if not targets_path.exists():
+            return False
+        with targets_path.open("r", encoding="utf-8", newline="") as fh:
+            existing = list(csv.DictReader(fh))
+        hit = False
+        for r in existing:
+            if (not (r.get("email") or "").strip()
+                    and _norm_profile(r.get("profile_url") or "") == norm_profile):
+                r["email"] = email
+                hit = True
+                break
+        if not hit:
+            return False
+        with targets_path.open("w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            w.writeheader()
+            for r in existing:
+                w.writerow({k: r.get(k, "") for k in CSV_FIELDS})
+    return True
+
+
+def _append_row(targets_path: Path, row: dict) -> None:
+    """Append one contact row (open→write→close under TARGETS_LOCK, so a
+    concurrent delete/rewrite can't corrupt the CSV; the row is also visible
+    to the Contacts page immediately)."""
+    with TARGETS_LOCK:
+        write_header = not targets_path.exists() or targets_path.stat().st_size == 0
+        with targets_path.open("a", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
 
 
 def run(log=print, extra_urls: list[str] | None = None, category: str = "research") -> dict:
@@ -539,17 +719,12 @@ def run(log=print, extra_urls: list[str] | None = None, category: str = "researc
     added_total = 0
     profile_fetches = 0
 
-    # Write contacts as they're found (so they appear on the Contacts page mid-run).
-    write_header = not targets_path.exists()
-    out_file = targets_path.open("a", encoding="utf-8", newline="")
-    writer = csv.DictWriter(out_file, fieldnames=CSV_FIELDS)
-    if write_header:
-        writer.writeheader()
-        out_file.flush()
+    # Contacts are written as they're found via _append_row (so they appear on
+    # the Contacts page mid-run without holding a run-long file handle).
 
     def process_people(people: list[dict], page_url: str) -> int:
         nonlocal added_total, profile_fetches
-        added = 0
+        candidates: list[dict] = []
         for p in people:
             name = p.get("name", "").strip()
             email = (p.get("email") or "").strip().lower()
@@ -563,10 +738,6 @@ def run(log=print, extra_urls: list[str] | None = None, category: str = "researc
             has_email = bool(email and "@" in email)
 
             # Step 1: skip non-research roles before any network calls.
-            _NON_RESEARCH_TITLES = (
-                "lecturer", "instructor", "teaching professor", "adjunct",
-                "visiting lecturer", "senior lecturer", "clinical", "emeritus",
-            )
             if title and any(t in title.lower() for t in _NON_RESEARCH_TITLES):
                 log(f"  ({name}: skipped — non-research title: {title})")
                 continue
@@ -575,9 +746,21 @@ def run(log=print, extra_urls: list[str] | None = None, category: str = "researc
             # This is always fast (no extra API search) and gives us the base info.
             if follow_profiles and profile_url and profile_fetches < max_profile_fetches:  # Step 2
                 profile_fetches += 1
+                page_text = ""
                 try:
                     page_text = _fetch_text(profile_url)
-                    result = _analyze_profile(client, model, page_text)
+                except Exception as e:  # fetch (requests/HTML) errors: soft-continue
+                    log(f"  ({name}: profile fetch error: {e})")
+                result = None
+                if page_text:
+                    try:
+                        result = _analyze_profile(client, model, page_text)
+                    except (anthropic.APIConnectionError, anthropic.AuthenticationError,
+                            anthropic.APIStatusError) as e:
+                        raise _pipeline_error_from(e) from e
+                    except Exception as e:
+                        log(f"  ({name}: profile error: {e})")
+                if result is not None:
                     if verify_persons and not result["is_real_person"]:
                         log(f"  ({name}: AI says not an individual — skipped)")
                         time.sleep(1)
@@ -587,8 +770,14 @@ def run(log=print, extra_urls: list[str] | None = None, category: str = "researc
                         has_email = bool(email and "@" in email)
                     if result["research_interests"]:
                         interests = result["research_interests"]
-                except Exception as e:
-                    log(f"  ({name}: profile error: {e})")
+                    if result["title"]:
+                        title = result["title"]
+                        # Emeritus/retired often shows only on the profile page —
+                        # re-apply the title filter with what we just learned.
+                        if any(t in title.lower() for t in _NON_RESEARCH_TITLES):
+                            log(f"  ({name}: skipped — non-research title on profile: {title})")
+                            time.sleep(1)
+                            continue
                 time.sleep(1)
 
             # Step 3: if we still lack an email, search for their personal lab site.
@@ -599,15 +788,32 @@ def run(log=print, extra_urls: list[str] | None = None, category: str = "researc
                 if research_site:
                     log(f"  ({name}: personal site → {research_site})")
                     profile_fetches += 1
+                    page_text = ""
                     try:
                         page_text = _fetch_text(research_site)
-                        result = _analyze_profile(client, model, page_text)
+                    except Exception as e:  # fetch (requests/HTML) errors: soft-continue
+                        log(f"  ({name}: personal site fetch error: {e})")
+                    result = None
+                    if page_text:
+                        try:
+                            result = _analyze_profile(client, model, page_text)
+                        except (anthropic.APIConnectionError, anthropic.AuthenticationError,
+                                anthropic.APIStatusError) as e:
+                            raise _pipeline_error_from(e) from e
+                        except Exception as e:
+                            log(f"  ({name}: personal site error: {e})")
+                    if result is not None:
                         email = result["email"] or _pick_email(page_text, name)
                         has_email = bool(email and "@" in email)
                         if result["research_interests"]:
                             interests = result["research_interests"]
-                    except Exception as e:
-                        log(f"  ({name}: personal site error: {e})")
+                        if result["title"]:
+                            title = result["title"]
+                            # Re-apply the title filter here too (see step 2).
+                            if any(t in title.lower() for t in _NON_RESEARCH_TITLES):
+                                log(f"  ({name}: skipped — non-research title on profile: {title})")
+                                time.sleep(1)
+                                continue
                     time.sleep(1)
 
             # Step 4: RocketReach-style email discovery (web search + SMTP verify).
@@ -626,15 +832,11 @@ def run(log=print, extra_urls: list[str] | None = None, category: str = "researc
                         email = found
                         has_email = True
 
-            # Step 5: filter with the real research info we now have.
-            if filter_by_research:
-                if not interests:
-                    log(f"  ({name}: filtered out — no research description found)")
-                    continue
-                match, reason = _check_research_fit(client, model, name, title, interests)
-                if not match:
-                    log(f"  ({name}: filtered out — {reason})")
-                    continue
+            # Contacts with no research description can't pass the research
+            # filter — drop them before the batched check below.
+            if filter_by_research and not interests:
+                log(f"  ({name}: filtered out — no research description found)")
+                continue
 
             # Store personal site as profile_url so the drafter uses the richer page.
             if research_site:
@@ -646,73 +848,106 @@ def run(log=print, extra_urls: list[str] | None = None, category: str = "researc
             # Skip if we have nothing to identify this person.
             if not has_email and not profile_url:
                 continue
+
+            candidates.append({
+                "name": name,
+                "email": email,
+                "title": title,
+                "affiliation": affiliation,
+                "interests": interests,
+                "profile_url": profile_url,
+            })
+
+        # Step 5: research-fit filter, batched so the rubric is sent once per
+        # ~25 contacts instead of once per person.
+        if filter_by_research and candidates:
+            keep = _check_research_fit_batch(client, model, candidates)
+            kept: list[dict] = []
+            for c, ok in zip(candidates, keep):
+                if ok:
+                    kept.append(c)
+                else:
+                    log(f"  ({c['name']}: filtered out — doesn't match the research filter)")
+            candidates = kept
+
+        added = 0
+        for c in candidates:
+            email = c["email"]
+            has_email = bool(email and "@" in email)
+            profile_url = c["profile_url"]
+            norm_profile = _norm_profile(profile_url)
+
             # Skip duplicates: an email match always wins; for email-less contacts
             # use profile_url so sites like Caltech (no public emails) still get saved.
             if has_email and email in seen_emails:
                 continue
-            if not has_email and profile_url in seen_profiles:
+            if not has_email and norm_profile in seen_profiles:
                 continue
+            if has_email and norm_profile and norm_profile in seen_profiles:
+                # Same profile already on file without an email — fill the email
+                # into the existing row instead of appending a duplicate.
+                if _fill_email(targets_path, norm_profile, email):
+                    log(f"  ({c['name']}: merged email into existing contact)")
+                    seen_emails.add(email)
+                    continue
 
             if has_email:
                 seen_emails.add(email)
-            if profile_url:
-                seen_profiles.add(profile_url)
+            if norm_profile:
+                seen_profiles.add(norm_profile)
 
-            writer.writerow(
-                {
-                    "name": name,
-                    "email": email,
-                    "title": title,
-                    "affiliation": affiliation,
-                    "research_interests": interests,
-                    "profile_url": profile_url,
-                    "source_url": page_url,
-                    "category": category,
-                }
-            )
-            out_file.flush()  # make the row visible to the Contacts page now
+            _append_row(targets_path, {
+                "name": c["name"],
+                "email": email,
+                "title": c["title"],
+                "affiliation": c["affiliation"],
+                "research_interests": c["interests"],
+                "profile_url": profile_url,
+                "source_url": page_url,
+                "category": category,
+            })
             added += 1
             added_total += 1
         return added
 
-    try:
-        for start_url in urls:
-            log(f"→ {start_url}")
-            if respect_robots and not _check_robots(start_url):
-                log("  robots.txt disallows this page — skipping. "
-                    "(Untick 'Respect robots.txt' on the Setup page to override.)")
+    for start_url in urls:
+        log(f"→ {start_url}")
+        if respect_robots and not _check_robots(start_url):
+            log("  robots.txt disallows this page — skipping. "
+                "(Untick 'Respect robots.txt' on the Setup page to override.)")
+            continue
+
+        queue = [start_url]
+        visited: set[str] = set()
+        pages = 0
+        while queue and pages < max_pages:
+            page_url = queue.pop(0)
+            if page_url in visited:
+                continue
+            visited.add(page_url)
+            pages += 1
+            try:
+                soup = _request_soup(page_url)
+            except Exception as e:  # fetch (requests/HTML) errors: soft-continue
+                log(f"  fetch failed: {e}")
+                continue
+            try:
+                people = _extract_people(client, model, effort, _soup_text(soup, page_url))
+            except (anthropic.APIConnectionError, anthropic.AuthenticationError,
+                    anthropic.APIStatusError) as e:
+                raise _pipeline_error_from(e) from e
+            except Exception as e:
+                log(f"  extraction failed: {e}")
                 continue
 
-            queue = [start_url]
-            visited: set[str] = set()
-            pages = 0
-            while queue and pages < max_pages:
-                page_url = queue.pop(0)
-                if page_url in visited:
-                    continue
-                visited.add(page_url)
-                pages += 1
-                try:
-                    soup = _request_soup(page_url)
-                except Exception as e:
-                    log(f"  fetch failed: {e}")
-                    continue
-                try:
-                    people = _extract_people(client, model, effort, _soup_text(soup, page_url))
-                except Exception as e:
-                    log(f"  extraction failed: {e}")
-                    continue
+            added = process_people(people, page_url)
+            label = f"  page {pages}" if pages > 1 else "  listing"
+            log(f"{label}: {len(people)} people, {added} new contacts.")
 
-                added = process_people(people, page_url)
-                label = f"  page {pages}" if pages > 1 else "  listing"
-                log(f"{label}: {len(people)} people, {added} new contacts.")
-
-                for nxt in _next_page_urls(soup, page_url):
-                    if nxt not in visited and nxt not in queue:
-                        queue.append(nxt)
-                time.sleep(1)  # be polite between pages
-    finally:
-        out_file.close()
+            for nxt in _next_page_urls(soup, page_url):
+                if nxt not in visited and nxt not in queue:
+                    queue.append(nxt)
+            time.sleep(1)  # be polite between pages
 
     log(f"Done. Added {added_total} new contacts.")
     return {"added": added_total, "urls": len(urls)}

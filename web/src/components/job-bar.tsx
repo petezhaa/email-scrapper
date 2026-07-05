@@ -21,7 +21,9 @@ export const PIPELINE_DONE = "pipeline:done";
 export function JobBar() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [dismissed, setDismissed] = useState("");
-  const runningIds = useRef<Set<string>>(new Set());
+  // id -> status from the previous poll; null until the first poll lands so
+  // jobs that were already finished at page load don't fire a notification.
+  const seen = useRef<Map<string, Job["status"]> | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -29,17 +31,28 @@ export function JobBar() {
       try {
         const data = await api.jobs();
         if (!alive) return;
-        // Detect running -> finished transitions and notify the page.
-        const nowRunning = new Set(
-          data.jobs.filter((j) => j.status === "running").map((j) => j.id),
-        );
-        for (const id of runningIds.current) {
-          if (!nowRunning.has(id)) {
-            window.dispatchEvent(new CustomEvent(PIPELINE_DONE));
-            break;
+        // Detect finished jobs and notify the page. A job counts as newly
+        // finished when its id is first observed in done/error (covers fast
+        // jobs that start + finish within one poll interval) or when a
+        // previously-running id disappears from the list.
+        const prev = seen.current;
+        if (prev) {
+          let finished = false;
+          for (const j of data.jobs) {
+            if (
+              (j.status === "done" || j.status === "error") &&
+              prev.get(j.id) !== j.status
+            ) {
+              finished = true;
+            }
           }
+          const ids = new Set(data.jobs.map((j) => j.id));
+          for (const [id, status] of prev) {
+            if (status === "running" && !ids.has(id)) finished = true;
+          }
+          if (finished) window.dispatchEvent(new CustomEvent(PIPELINE_DONE));
         }
-        runningIds.current = nowRunning;
+        seen.current = new Map(data.jobs.map((j) => [j.id, j.status]));
         setJobs(data.jobs);
       } catch {
         /* backend momentarily unreachable */
@@ -74,7 +87,7 @@ export function JobBar() {
             {running.map((r) => r.label).join(" + ")}…
           </b>
           {j.last && (
-            <span className="text-background/60"> — {j.last}</span>
+            <span className="text-[#ece4d3]/60"> — {j.last}</span>
           )}
         </span>
       </>
@@ -100,43 +113,53 @@ export function JobBar() {
         <CheckCircle2 className="size-4 shrink-0 text-[#8fd6a5]" />
         <span className="min-w-0 flex-1 truncate">
           <b className="font-semibold text-[#8fd6a5]">{recent.label} — done.</b>
+          {recent.last && (
+            <span className="text-[#ece4d3]/60"> {recent.last}</span>
+          )}
         </span>
       </>
     );
   }
 
   const visible = !!content && dismissed !== key;
-  if (!visible) return null;
 
+  // The wrapper stays mounted so screen readers keep a live region to
+  // announce status changes into; only the bar itself is conditional.
   return (
-    <div className="fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
-      <div
-        className={cn(
-          "flex w-full max-w-[720px] items-center gap-3 rounded-xl border px-4 py-3 text-sm shadow-2xl",
-          "border-white/10 bg-[#16130d] text-[#ece4d3]",
-        )}
-      >
-        {content}
-        {tone === "ok" && doneLink && (
-          <Link
-            href={doneLink.href}
-            onClick={() => setDismissed(key)}
-            className="flex shrink-0 items-center gap-1 rounded-md bg-[#d97a4e] px-3 py-1.5 text-xs font-semibold text-[#16130d] transition-[filter] hover:brightness-105"
-          >
-            {doneLink.label}
-            <ArrowRight className="size-3.5" />
-          </Link>
-        )}
-        {tone !== "run" && (
-          <button
-            aria-label="Dismiss"
-            onClick={() => setDismissed(key)}
-            className="shrink-0 rounded-md p-1 text-[#ece4d3]/60 transition-colors hover:text-[#ece4d3]"
-          >
-            <X className="size-4" />
-          </button>
-        )}
-      </div>
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed inset-x-0 bottom-5 z-50 flex justify-center px-4"
+    >
+      {visible && (
+        <div
+          className={cn(
+            "flex w-full max-w-[720px] items-center gap-3 rounded-xl border px-4 py-3 text-sm shadow-2xl",
+            "border-white/10 bg-[#16130d] text-[#ece4d3]",
+          )}
+        >
+          {content}
+          {tone === "ok" && doneLink && (
+            <Link
+              href={doneLink.href}
+              onClick={() => setDismissed(key)}
+              className="flex shrink-0 items-center gap-1 rounded-md bg-[#d97a4e] px-3 py-1.5 text-xs font-semibold text-[#16130d] transition-[filter] hover:brightness-105"
+            >
+              {doneLink.label}
+              <ArrowRight className="size-3.5" />
+            </Link>
+          )}
+          {tone !== "run" && (
+            <button
+              aria-label="Dismiss"
+              onClick={() => setDismissed(key)}
+              className="shrink-0 rounded-md p-1 text-[#ece4d3]/60 transition-colors hover:text-[#ece4d3]"
+            >
+              <X className="size-4" />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

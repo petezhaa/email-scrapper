@@ -205,7 +205,13 @@ def update_env(updates: dict) -> None:
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8").splitlines()
 
-    remaining = dict(updates)
+    # Sanitize before writing: a CR/LF embedded in a value could inject an
+    # extra KEY=value line into .env, and an '=' in a key would corrupt it.
+    remaining: dict[str, str] = {}
+    for key, val in updates.items():
+        if "=" in key:
+            raise ConfigError(f"Invalid .env key (contains '='): {key!r}")
+        remaining[key] = str(val).replace("\r", "").replace("\n", "")
     out: list[str] = []
     for line in lines:
         stripped = line.strip()

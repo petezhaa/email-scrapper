@@ -85,15 +85,16 @@ assistant writes one."""
 
 # ── Step 1: Claude researches the professor ────────────────────────────────────
 
-WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 2}
+WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
-WEB_RESEARCH_PROMPT = """You are helping the applicant (described in the profile) \
+WEB_RESEARCH_PROMPT = """You are helping the applicant (described below) \
 write a short cold email about a specific job opening at a company. Search the web and \
 build a brief so the email opens on something concrete about the company or the role.
 
 Contact / company: {name}
 Company: {affiliation}
 What the posting says: {interests}
+The applicant: {applicant}
 
 Do these searches:
 1. Search "{affiliation}" and its careers / team pages to see what the company does.
@@ -105,7 +106,8 @@ Return a plain-text brief with:
 
 BEST HOOK: The most specific, concrete thing the applicant can connect to — a product, \
 platform, pipeline area, or the core responsibility of this role. One or two sentences on \
-what it is. This is the most important field.
+what it is. Pick whatever best matches the applicant's background above. This is the most \
+important field.
 
 COMPANY CONTEXT: 1-2 sentences on what the company does and where this role fits.
 
@@ -114,25 +116,51 @@ confidently identify the company or role, reply with exactly: NO_RELIABLE_INFO""
 
 
 def _web_research(client, model: str, name: str, affiliation: str, interests: str, log,
-                  category: str = "research") -> str:
-    """Claude: web-search the recipient and return a plain-text research brief (or '')."""
+                  category: str = "research", applicant: str = "") -> str:
+    """Claude: web-search the recipient and return a plain-text research brief (or '').
+
+    Raises PipelineError on connection/auth failures so the UI shows the real
+    problem; anything content-level (empty text, NO_RELIABLE_INFO) soft-skips.
+    """
+    import anthropic
+
     if not name:
         return ""
     template = WEB_RESEARCH_PROMPT if category == "industry" else ACADEMIC_WEB_RESEARCH_PROMPT
     prompt = template.format(
-        name=name, affiliation=affiliation or "(unknown)", interests=interests or "(none listed)"
+        name=name, affiliation=affiliation or "(unknown)",
+        interests=interests or "(none listed)",
+        applicant=applicant or "(no applicant details provided)",
     )
     messages = [{"role": "user", "content": prompt}]
     try:
         for _ in range(3):
             resp = client.messages.create(
-                model=model, max_tokens=1500, tools=[WEB_SEARCH_TOOL], messages=messages
+                model=model, max_tokens=2000, tools=[WEB_SEARCH_TOOL],
+                output_config={"effort": "low"},
+                cache_control={"type": "ephemeral"},
+                messages=messages,
             )
             if resp.stop_reason == "pause_turn":
                 messages.append({"role": "assistant", "content": resp.content})
                 continue
             break
         text = "\n".join(b.text for b in resp.content if b.type == "text").strip()
+    except anthropic.APIConnectionError as e:
+        raise PipelineError(
+            "Couldn't reach the AI endpoint (connection error). Check your "
+            "network/VPN and ANTHROPIC_BASE_URL in .env, then draft again."
+        ) from e
+    except anthropic.AuthenticationError as e:
+        raise PipelineError(
+            "The AI endpoint rejected the credential (401). "
+            "Check ANTHROPIC_API_KEY in .env."
+        ) from e
+    except anthropic.APIStatusError as e:
+        raise PipelineError(
+            f"The AI endpoint returned an error ({e.status_code}). "
+            "Try again in a minute."
+        ) from e
     except Exception as e:
         log(f"  (web research failed for {name}: {e})")
         return ""
@@ -156,10 +184,16 @@ THE EMAIL MUST:
   company or team rather than a named person, open with "Hello,".
 - In the first 1-2 sentences, name the specific role and one concrete detail about the \
   company or role (from the brief) — not "your company" or "your work".
+- If the research brief is empty or unavailable, open modestly and generically on the \
+  role itself — name NO specific product, platform, or result, and NEVER invent facts \
+  about the recipient or the applicant. Facts about the applicant may come only from the \
+  profile/resume text provided.
 - Give 2-3 sentences on the applicant's most relevant REAL experience, drawn only from the \
   profile and resume. Never invent experience, skills, or credentials.
 - Close by expressing interest in the role and asking about next steps; note that a CV is \
   attached.
+- Subject line: plain, specific, no clickbait — name the role (and company) and make the \
+  ask clear (e.g. "Interest in the [Role] role at [Company]").
 - Be under ~180 words. Plain, direct, professional — scientist/professional to \
   professional, not a nervous student.
 
@@ -250,17 +284,29 @@ RULES (fix every failure):
 1. Greeting: "Hi [First]," if a person is named; "Hello," if it's addressed to a company \
    or team. Never "Dear Professor", never a full name.
 2. The opening must name the SPECIFIC role and one concrete detail about the company or \
-   role. "Your company" or "your work" is a FAIL.
-3. It must connect that to the applicant's real experience. Invent nothing — no skills, \
+   role. "Your company" or "your work" is a FAIL. Every specific claim about the company \
+   or role must be supported by the research brief below — rewrite or remove any that isn't.
+3. If the research brief is empty or unavailable, the email must open modestly and \
+   generically — NO specific product, platform, or result named. Never invent facts about \
+   the recipient or the applicant, and do not add specifics yourself.
+4. It must connect that to the applicant's real experience. Invent nothing — no skills, \
    techniques, or credentials that aren't in the email already.
-4. Under ~180 words. Must end by expressing interest in the role and asking about next \
+5. Under ~180 words. Must end by expressing interest in the role and asking about next \
    steps, and mention the attached CV.
-5. No em dashes anywhere. No links or contact info in the body.
-6. No filler / clichés: "passionate about", "fascinated by", "excited to", "would love \
+6. No em dashes anywhere. No links or contact info in the body.
+7. No filler / clichés: "passionate about", "fascinated by", "excited to", "would love \
    the opportunity", "leveraging", "synergy", "robust", "novel", "pioneering", \
    "groundbreaking", "align", "spearheading".
-7. Keep it signed with the sender's name already in the email; do not change the name.
+8. Keep it signed with the sender's name already in the email; do not change the name.
 """ + _HUMAN_VOICE + """
+
+CONTEXT (verify the email's specifics against this — the brief is the only allowed \
+source for claims about the company/role):
+Recipient: {name} — {affiliation}
+Subject line: {subject}
+<research_brief>
+{research_brief}
+</research_brief>
 
 EMAIL TO FIX:
 ---
@@ -269,16 +315,43 @@ EMAIL TO FIX:
 
 
 def _review_email(oai_client, model: str, body: str, log, name: str = "",
-                  category: str = "research") -> str:
-    """Gemini: review the email body and return the fixed version."""
+                  category: str = "research", subject: str = "",
+                  affiliation: str = "", research_brief: str = "") -> str:
+    """Gemini: review the email body and return the fixed version.
+
+    Raises PipelineError on connection/auth failures so the UI shows the real
+    problem; content-level hiccups keep the unreviewed body.
+    """
+    import openai
+
     template = REVIEWER_PROMPT if category == "industry" else ACADEMIC_REVIEWER_PROMPT
+    prompt = template.format(
+        body=body,
+        name=name or "(unknown)",
+        affiliation=affiliation or "(unknown)",
+        subject=subject or "(none)",
+        research_brief=research_brief or (
+            "(no research brief available — the email must not contain specific "
+            "claims about the recipient beyond the context above)"
+        ),
+    )
     try:
         resp = oai_client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": template.format(body=body)}],
+            messages=[{"role": "user", "content": prompt}],
         )
         fixed = (resp.choices[0].message.content or "").strip()
         return fixed if fixed else body
+    except openai.APIConnectionError as e:
+        raise PipelineError(
+            "Couldn't reach the AI endpoint for the review step (connection "
+            "error). Check your network/VPN and .env, then draft again."
+        ) from e
+    except openai.AuthenticationError as e:
+        raise PipelineError(
+            "The AI endpoint rejected the credential for the review step (401). "
+            "Check your key in .env."
+        ) from e
     except Exception as e:
         log(f"  (review failed for {name}: {e})")
         return body
@@ -353,6 +426,39 @@ def _first_name(full_name: str) -> str:
     return parts[0] if parts else full_name.strip()
 
 
+def _profile_section(profile: str, *keywords: str) -> str:
+    """Return the text under the first '## ' heading whose title contains any keyword."""
+    for m in re.finditer(r"^##\s*(.+?)\s*$\n(.*?)(?=^##\s|\Z)", profile, re.M | re.S):
+        heading = m.group(1).lower()
+        if any(k in heading for k in keywords):
+            body = m.group(2).strip()
+            if body:
+                return body
+    return ""
+
+
+def _profile_sections_blank(profile: str) -> bool:
+    """True when the About / Experience / Interests sections of the profile are
+    all effectively empty — i.e. there is nothing real to ground an email in."""
+    if not re.search(r"^##\s", profile, re.M):
+        return not profile.strip()  # free-form profile: any text counts
+    return not any(
+        _profile_section(profile, kw) for kw in ("who i am", "experience", "interests")
+    )
+
+
+def _applicant_summary(profile: str) -> str:
+    """A 1-2 sentence sketch of the applicant (About + Interests) so the web
+    research step can pick a BEST HOOK that actually connects to them."""
+    parts = []
+    for section in (_profile_section(profile, "who i am", "about"),
+                    _profile_section(profile, "interests")):
+        text = " ".join(section.split())
+        if text:
+            parts.append(re.split(r"(?<=[.!?])\s+", text)[0])
+    return " ".join(parts)[:400]
+
+
 def write_draft_file(
     path: Path,
     *,
@@ -390,6 +496,7 @@ professor's work.
 Professor: {name}
 Affiliation: {affiliation}
 Known focus: {interests}
+The applicant: {applicant}
 
 Do these searches:
 1. "{name} {affiliation}" — their faculty/lab page and Google Scholar profile.
@@ -398,8 +505,8 @@ Do these searches:
 
 Return a plain-text brief with:
 BEST HOOK: The most specific recent paper or project — "[year] [title or one-line \
-description] — [one concrete finding or method]". This is what the email opens on. \
-The most important field.
+description] — [one concrete finding or method]". Prefer work that connects to the \
+applicant's background above. This is what the email opens on. The most important field.
 CURRENT FOCUS: 2-3 sentences on what the lab is actively working on now.
 
 Only include things you actually found via search. If you cannot confidently \
@@ -419,10 +526,16 @@ THE EMAIL MUST:
   their title clearly isn't professor).
 - Open (1-2 sentences) on the specific recent paper/project from the brief, with one \
   concrete detail, and why it connects to the applicant's genuine interests.
+- If the research brief is empty or unavailable, open modestly on the lab's general \
+  area (from the research focus given) — name NO specific paper or result, and NEVER \
+  invent facts about the professor or the applicant. Facts about the applicant may \
+  come only from the profile/resume text provided.
 - Give 2-3 sentences on the applicant's most relevant REAL experience, drawn only \
   from the profile and resume — never invent anything.
 - Close by asking whether they are taking on students/researchers and offering to \
   share more; note that a CV is attached.
+- Subject line: plain, specific, no clickbait — the research area plus the ask \
+  (e.g. "Research opportunity inquiry — [topic]").
 - Be under ~180 words. Plain, direct, scientist-to-scientist.
 - No clichés ("passionate", "fascinated", "excited", "align", "leverage", "robust", \
   "novel", "groundbreaking"). No em dashes. No links in the body.
@@ -459,14 +572,27 @@ RULES (fix every failure):
 1. Greeting: "Dear Professor [Last]," or "Dear Dr. [Last]," — never "Hi", never a \
    first name, never a full name.
 2. The opening must name a SPECIFIC recent paper or project of the professor and one \
-   concrete detail. "Your work on X" or "your research in the field" is a FAIL.
-3. It must connect that work to the applicant's real interests/experience. Invent nothing.
-4. Under ~180 words. Must end with a clear ask about research opportunities and mention \
+   concrete detail. "Your work on X" or "your research in the field" is a FAIL. Every \
+   specific claim about the professor's work must be supported by the research brief \
+   below — rewrite or remove any that isn't.
+3. If the research brief is empty or unavailable, the email must open modestly and \
+   generically on the lab's area — NO specific paper or result named. Never invent \
+   facts about the professor or the applicant, and do not add specifics yourself.
+4. It must connect that work to the applicant's real interests/experience. Invent nothing.
+5. Under ~180 words. Must end with a clear ask about research opportunities and mention \
    the attached CV.
-5. No clichés: "passionate", "fascinated", "excited", "align", "leverage", "synergy", \
+6. No clichés: "passionate", "fascinated", "excited", "align", "leverage", "synergy", \
    "robust", "novel", "pioneering", "groundbreaking". No em dashes. No links in the body.
-6. Keep it signed with the sender's name; do not add contact details.
+7. Keep it signed with the sender's name; do not add contact details.
 """ + _HUMAN_VOICE + """
+
+CONTEXT (verify the email's specifics against this — the brief is the only allowed \
+source for claims about the professor's work):
+Recipient: {name} — {affiliation}
+Subject line: {subject}
+<research_brief>
+{research_brief}
+</research_brief>
 
 EMAIL TO FIX:
 ---
@@ -489,6 +615,8 @@ def run(limit: int | None = None, log=print, keep_going=None,
     """
     import time as _time
 
+    import openai
+
     cfg = load_config()
     claude_client = build_anthropic_client()
     writer_client = build_writer_client()
@@ -508,6 +636,12 @@ def run(limit: int | None = None, log=print, keep_going=None,
         )
 
     resume_text = _extract_resume_text(resolve(cfg["paths"]["resume"]))
+    if not resume_text and _profile_sections_blank(profile):
+        raise PipelineError(
+            "There is nothing to ground the emails in: your profile is blank and "
+            "no resume text could be read. Fill in Setup → \"About you\" and "
+            "upload a real resume PDF first."
+        )
     resume_section = (
         RESUME_SECTION_TEMPLATE.format(resume_text=resume_text) if resume_text else ""
     )
@@ -515,6 +649,7 @@ def run(limit: int | None = None, log=print, keep_going=None,
         log("Using your resume contents to ground the emails.")
     else:
         log("No readable resume PDF found — using your typed profile only.")
+    applicant_summary = _applicant_summary(profile)
 
     claude_model = cfg["model"]["name"]
     writer_model = cfg["model"].get("writer", "openai/gpt-4o")
@@ -563,7 +698,7 @@ def run(limit: int | None = None, log=print, keep_going=None,
                 log(f"  [{name}] researching…")
                 research_brief = _web_research(
                     claude_client, claude_model, name, affiliation, interests, log,
-                    category=category,
+                    category=category, applicant=applicant_summary,
                 )
 
             # Step 2: GPT writes
@@ -579,18 +714,39 @@ def run(limit: int | None = None, log=print, keep_going=None,
                     profile, resume_section, page_section, research_brief,
                     sender_name, log, category=category,
                 )
+            except PipelineError:
+                raise  # real cause (connection/auth) — surface it to the user
+            except openai.APIConnectionError as e:
+                raise PipelineError(
+                    "Couldn't reach the AI endpoint for the writer step (connection "
+                    "error). Check your network/VPN and .env, then draft again."
+                ) from e
+            except openai.AuthenticationError as e:
+                raise PipelineError(
+                    "The AI endpoint rejected the credential for the writer step "
+                    "(401). Check your key in .env."
+                ) from e
             except Exception as e:
                 log(f"  [{name}] write failed: {e}")
                 continue
 
-            subject = _no_dashes(data.get("subject") or cfg["email"]["subject_fallback"])
+            if category == "industry":
+                fallback_subject = (
+                    f"Interest in the {title} role" if title
+                    else "Interest in joining your team"
+                )
+            else:
+                fallback_subject = cfg["email"]["subject_fallback"]
+            subject = _no_dashes(data.get("subject") or fallback_subject)
             body = (data.get("body") or "").strip()
 
             # Step 3: Gemini reviews (optional — controlled by quality_review toggle)
             if quality_review:
                 log(f"  [{name}] reviewing…")
                 body = _review_email(reviewer_client, reviewer_model, body, log,
-                                     name=name, category=category)
+                                     name=name, category=category, subject=subject,
+                                     affiliation=affiliation,
+                                     research_brief=research_brief)
             body = _no_dashes(body)
 
             write_draft_file(
@@ -639,8 +795,14 @@ Applicant profile:
 {profile}
 </profile>
 
+The original email (reference only what it actually said — do not invent claims or \
+details that aren't in it):
+<original_email>
+{original_email}
+</original_email>
+
 Greet by first name if "{name}" is a person, otherwise open with "Hello,". Keep the \
-subject as "Re: {subject}" unless a shorter one clearly fits. Sign off as {sender_name}.
+subject as "{reply_subject}" unless a shorter one clearly fits. Sign off as {sender_name}.
 Return JSON: {{"subject": "...", "body": "..."}}"""
 
 
@@ -656,9 +818,26 @@ def follow_up(to: str, name: str, subject: str, log=print) -> dict:
     drafts_dir = resolve(cfg["paths"]["drafts_dir"])
     drafts_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ground the follow-up in what the first email actually said.
+    original_email = ""
+    orig_path = drafts_dir / f"{slug_for(to, name)}.md"
+    if orig_path.exists():
+        raw = orig_path.read_text(encoding="utf-8")
+        parts = raw.split("---\n", 2)
+        original_email = (parts[2] if len(parts) == 3 else raw).strip()
+
+    # Only prefix "Re: " when the original subject doesn't already carry one.
+    reply_subject = (
+        subject if re.match(r"^\s*re:", subject or "", re.I) else f"Re: {subject}"
+    )
+
     prompt = FOLLOWUP_USER_PROMPT.format(
         name=name or "(unknown)", subject=subject or "(no subject)",
         profile=profile, sender_name=sender_name,
+        original_email=original_email or (
+            "(original draft not found — keep the reference generic and invent nothing)"
+        ),
+        reply_subject=reply_subject,
     )
     log(f"  [{name}] writing follow-up…")
     resp = writer_client.chat.completions.create(
@@ -670,7 +849,7 @@ def follow_up(to: str, name: str, subject: str, log=print) -> dict:
         ],
     )
     data = json.loads(resp.choices[0].message.content or "{}")
-    subj = _no_dashes(data.get("subject") or f"Re: {subject}")
+    subj = _no_dashes(data.get("subject") or reply_subject)
     body = _no_dashes((data.get("body") or "").strip())
 
     slug = slug_for(to, name) + "_followup"

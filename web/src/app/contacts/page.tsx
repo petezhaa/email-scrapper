@@ -1,14 +1,27 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ArrowRight, Check, ExternalLink, Loader2, PencilLine, Search, Trash2 } from "lucide-react";
 import { api, type Contact } from "@/lib/api";
+import { useRunningJob } from "@/lib/use-jobs";
 import { PIPELINE_DONE } from "@/components/job-bar";
+import { BackendDownBanner } from "@/components/backend-down";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -28,9 +41,20 @@ export default function ContactsPage() {
   const [research, setResearch] = useState("");
   const [cat, setCat] = useState<"all" | "research" | "industry">("all");
   const [drafting, setDrafting] = useState(false);
+  const [backendDown, setBackendDown] = useState(false);
+  const findingJob = useRunningJob(["discover", "scrape"]);
 
   const load = useCallback(() => {
-    api.getContacts().then((d) => setRows(d.rows)).catch(() => setRows([]));
+    api
+      .getContacts()
+      .then((d) => {
+        setBackendDown(false);
+        setRows(d.rows);
+      })
+      .catch((e) => {
+        setBackendDown((e as Error).name === "BackendDown");
+        setRows([]);
+      });
   }, []);
 
   useEffect(() => {
@@ -67,7 +91,10 @@ export default function ContactsPage() {
   async function generate() {
     setDrafting(true);
     try {
-      await api.runDraft();
+      const res = await api.runDraft();
+      if (res.already_running) {
+        toast.info("Drafting is already in progress — nothing new was started.");
+      }
       router.push("/drafts");
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
@@ -77,29 +104,57 @@ export default function ContactsPage() {
 
   async function draftOne(row: Contact) {
     try {
-      await api.draftOne({
+      const res = await api.draftOne({
         email: row.email || undefined,
         profile_url: row.profile_url || undefined,
         name: row.name || undefined,
       });
-      toast.success(`Drafting an email for ${row.name || "this contact"} — check the Drafts tab.`);
+      if (res.already_running) {
+        toast.info(
+          `A draft job is already running — ${row.name || "this contact"} wasn't queued. Try again once it finishes.`,
+        );
+      } else {
+        toast.success(`Drafting an email for ${row.name || "this contact"} — check the Drafts tab.`);
+      }
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
     }
   }
 
-  async function remove(row: Contact) {
+  function remove(row: Contact) {
+    // Optimistic remove with an undo window; the server delete only happens
+    // once the toast has expired without the user clicking Undo.
+    const idx = rows?.indexOf(row) ?? -1;
     setRows((prev) => prev?.filter((x) => x !== row) ?? null);
-    try {
-      await api.deleteContact(
-        row.email ? { email: row.email } : { profile_url: row.profile_url },
-      );
-    } catch {
-      load();
-    }
+    let undone = false;
+    toast(`Removed ${row.name || row.email || "contact"}.`, {
+      duration: 5000,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          undone = true;
+          setRows((prev) => {
+            const next = prev ? [...prev] : [];
+            next.splice(idx < 0 ? next.length : Math.min(idx, next.length), 0, row);
+            return next;
+          });
+        },
+      },
+    });
+    setTimeout(async () => {
+      if (undone) return;
+      try {
+        await api.deleteContact(
+          row.email ? { email: row.email } : { profile_url: row.profile_url },
+        );
+      } catch {
+        load();
+      }
+    }, 5500);
   }
 
   const total = rows?.length ?? 0;
+  const undrafted = (rows ?? []).filter((r) => !r.drafted).length;
   const active = q || research;
 
   return (
@@ -113,27 +168,53 @@ export default function ContactsPage() {
             </span>
           )}
         </h1>
-        <Button onClick={generate} disabled={drafting || total === 0}>
-          {drafting ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <ArrowRight className="size-4" />
-          )}
-          Generate drafts
-        </Button>
+        <Dialog>
+          <DialogTrigger
+            render={<Button disabled={drafting || undrafted === 0} />}
+          >
+            {drafting ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <ArrowRight className="size-4" />
+            )}
+            Generate drafts
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Generate drafts</DialogTitle>
+              <DialogDescription>
+                Generate drafts for all {undrafted} undrafted contact
+                {undrafted === 1 ? "" : "s"}? Each draft makes several AI calls.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <DialogClose render={<Button variant="outline" />}>Cancel</DialogClose>
+              <DialogClose render={<Button onClick={generate} />}>
+                Generate drafts
+              </DialogClose>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
 
       {rows === null ? (
         <Skeleton className="h-64 w-full" />
+      ) : backendDown ? (
+        <BackendDownBanner onRetry={load} />
+      ) : total === 0 && findingJob ? (
+        <Card className="flex flex-col items-center gap-3 py-16 text-center text-muted-foreground">
+          <Loader2 className="size-8 animate-spin text-muted-foreground/60" />
+          <p>Finding contacts — {findingJob.last}</p>
+        </Card>
       ) : total === 0 ? (
         <Card className="flex flex-col items-center gap-3 py-16 text-center text-muted-foreground">
           <Search className="size-8 text-muted-foreground/60" strokeWidth={1.5} />
           <p>
             No contacts yet. Go to{" "}
-            <a href="/setup" className="text-brand underline underline-offset-2">
-              Setup
-            </a>
-            , add organizations or a search, and start finding contacts.
+            <Link href="/find" className="text-brand underline underline-offset-2">
+              Find
+            </Link>
+            , run a search or add organizations, and start finding contacts.
           </p>
         </Card>
       ) : (
@@ -169,6 +250,7 @@ export default function ContactsPage() {
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 placeholder="Search all…"
+                aria-label="Search contacts"
                 className="w-64 pl-9"
               />
             </div>
@@ -176,6 +258,7 @@ export default function ContactsPage() {
               value={research}
               onChange={(e) => setResearch(e.target.value)}
               placeholder="Filter by research interest…"
+              aria-label="Filter by research interest"
               className="w-64"
             />
             {active || cat !== "all" ? (
@@ -357,6 +440,7 @@ function AddEmail({
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && save()}
         placeholder="add email"
+        aria-label="Add email address for this contact"
         className="h-8 w-40 text-[13px]"
       />
       <Button size="sm" variant="ghost" className="h-8 text-brand" onClick={save} disabled={saving}>

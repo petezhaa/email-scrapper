@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
@@ -11,6 +11,7 @@ import {
   Search,
 } from "lucide-react";
 import { api, type ContactCategory } from "@/lib/api";
+import { useRunningJob } from "@/lib/use-jobs";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -76,6 +77,9 @@ export default function FindPage() {
   const [findEmails, setFindEmails] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState<"discover" | "scrape" | null>(null);
+  // Real job state from the backend, so the buttons stay disabled while a
+  // search/scrape is still running in the background.
+  const running = useRunningJob(["discover", "scrape"]);
 
   useEffect(() => {
     api
@@ -107,10 +111,14 @@ export default function FindPage() {
     setBusy("discover");
     try {
       await saveOpts();
-      await api.runDiscover(query.trim(), tab, tab === "research" && findEmails);
-      toast.success(
-        "Searching — new contacts are added to Contacts. Search again to add more.",
-      );
+      const r = await api.runDiscover(query.trim(), tab, tab === "research" && findEmails);
+      if (r.already_running) {
+        toast.info("A search is already running — wait for it to finish before starting another.");
+      } else {
+        toast.success(
+          "Searching — new contacts are added to Contacts. Search again to add more.",
+        );
+      }
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
     } finally {
@@ -126,8 +134,12 @@ export default function FindPage() {
     setBusy("scrape");
     try {
       await saveOpts();
-      await api.runScrape(tab);
-      toast.success("Scraping — new contacts are added to Contacts.");
+      const r = await api.runScrape(tab);
+      if (r.already_running) {
+        toast.info("A scrape is already running — wait for it to finish before starting another.");
+      } else {
+        toast.success("Scraping — new contacts are added to Contacts.");
+      }
     } catch (e) {
       toast.error(String((e as Error).message ?? e));
     } finally {
@@ -186,10 +198,11 @@ export default function FindPage() {
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && find()}
                   placeholder={mode.placeholder}
+                  aria-label="Field or keyword to search"
                   className="pl-9"
                 />
               </div>
-              <Button onClick={find} disabled={!!busy} className="sm:w-44">
+              <Button onClick={find} disabled={!!busy || !!running} className="sm:w-44">
                 {busy === "discover" ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
@@ -198,6 +211,12 @@ export default function FindPage() {
                 {tab === "industry" ? "Find jobs" : "Find contacts"}
               </Button>
             </div>
+            {running?.kind === "discover" && (
+              <p className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
+                <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                Working — {running.last}
+              </p>
+            )}
 
             <div className="flex flex-wrap gap-2">
               {mode.presets.map((p) => (
@@ -235,7 +254,7 @@ export default function FindPage() {
             <Skeleton className="h-20 w-full" />
           )}
           <div className="flex flex-wrap items-center gap-3">
-            <Button variant="outline" onClick={scrapeUrls} disabled={!!busy}>
+            <Button variant="outline" onClick={scrapeUrls} disabled={!!busy || !!running}>
               {busy === "scrape" ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : (
@@ -248,6 +267,12 @@ export default function FindPage() {
               scraped as-is.
             </span>
           </div>
+          {running?.kind === "scrape" && (
+            <p className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
+              <Loader2 className="size-3.5 shrink-0 animate-spin" />
+              Working — {running.last}
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -295,12 +320,20 @@ function Opt({
   title: string;
   hint: string;
 }) {
+  const titleId = useId();
+  const hintId = useId();
   return (
     <div className="flex items-start gap-3">
-      <Switch checked={checked} onCheckedChange={onChange} className="mt-0.5" />
+      <Switch
+        checked={checked}
+        onCheckedChange={onChange}
+        aria-labelledby={titleId}
+        aria-describedby={hintId}
+        className="mt-0.5"
+      />
       <div className="space-y-1">
-        <p className="text-sm font-medium leading-none">{title}</p>
-        <p className="text-[13px] leading-snug text-muted-foreground">{hint}</p>
+        <p id={titleId} className="text-sm font-medium leading-none">{title}</p>
+        <p id={hintId} className="text-[13px] leading-snug text-muted-foreground">{hint}</p>
       </div>
     </div>
   );

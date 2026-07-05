@@ -38,13 +38,20 @@ export default function RootLayout({
       <body
         className={`${inter.variable} ${fraunces.variable} ${mono.variable} antialiased min-h-dvh`}
       >
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-background focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:ring-1 focus:ring-foreground/10"
+        >
+          Skip to content
+        </a>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           <SiteHeader />
-          <main className="mx-auto w-full max-w-5xl px-6 pb-32 pt-10">
+          <main id="main" className="mx-auto w-full max-w-5xl px-6 pb-32 pt-10">
             <PageTransition>{children}</PageTransition>
           </main>
           <JobBar />
-          <Toaster position="bottom-center" />
+          {/* Offset keeps bottom-center toasts clear of the job bar. */}
+          <Toaster position="bottom-center" offset={96} mobileOffset={96} />
         </ThemeProvider>
       </body>
     </html>

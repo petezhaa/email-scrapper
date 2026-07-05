@@ -29,5 +29,6 @@ scraping:
   max_pages: 50
 sending:
   max_per_run: 50
-  delay_seconds: 5
+  delay_seconds: 30
+  daily_cap: 40
   dry_run_default: true

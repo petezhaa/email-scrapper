@@ -13,7 +13,9 @@ from __future__ import annotations
 import csv
 import json
 import threading
+import traceback
 import uuid
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
@@ -30,6 +32,7 @@ from .config import (
     save_config,
     update_env,
 )
+from .scrape import TARGETS_LOCK
 
 # Make sure the data folders exist before anything reads config.
 bootstrap()
@@ -40,44 +43,95 @@ app = Flask(__name__, static_folder=None)
 # In-memory job registry for long-running actions (scrape / draft / send).
 # Single local user, so a plain dict is fine.
 JOBS: dict[str, dict] = {}
-_JOBS_LOCK = threading.Lock()   # guards check-and-start to prevent duplicate jobs
-_CSV_LOCK = threading.Lock()    # guards all read-modify-write operations on targets.csv
+_JOBS_LOCK = threading.RLock()  # guards ALL reads/writes of JOBS (workers + routes)
+# targets.csv reads/writes are guarded by TARGETS_LOCK, shared with scrape.py.
 
 PROFILE_FIELDS = resolve("data/profile_fields.json")
+
+# Loopback names this server will answer to (it only binds 127.0.0.1).
+_ALLOWED_HOSTS = ("127.0.0.1", "localhost")
+
+
+@app.before_request
+def _reject_non_local():
+    """Refuse anything that isn't the local frontend talking to us.
+
+    - The Host header must be loopback: blocks DNS-rebinding pages whose
+      attacker domain resolves to 127.0.0.1.
+    - Mutating requests carrying an Origin header must come from a localhost
+      origin (any port): blocks cross-site fetch CSRF. The Next dev proxy
+      usually sends no Origin at all, which passes.
+    - POSTs must be JSON (except the /api/resume multipart upload): a
+      cross-site HTML form can't set application/json, so form posts die here.
+    """
+    host = (request.host or "").partition(":")[0].strip().lower()
+    if host not in _ALLOWED_HOSTS:
+        return jsonify(error="Forbidden: non-local Host."), 403
+    if request.method in ("POST", "DELETE"):
+        origin = request.headers.get("Origin")
+        if origin:
+            origin_host = (urlsplit(origin).hostname or "").lower()
+            if origin_host not in _ALLOWED_HOSTS:
+                return jsonify(error="Forbidden: cross-site Origin."), 403
+        if request.method == "POST" and request.path != "/api/resume" and not request.is_json:
+            return jsonify(error="Forbidden: JSON body required."), 403
+    return None
 
 
 # ───────────────────────── background jobs ─────────────────────────
 def _job_running(kind: str) -> bool:
-    return any(j["kind"] == kind and j["status"] == "running" for j in JOBS.values())
+    with _JOBS_LOCK:
+        return any(j["kind"] == kind and j["status"] == "running" for j in JOBS.values())
 
 
-def _start_job(fn, kind: str, label: str) -> str:
+def _start_job(fn, kind: str, label: str) -> tuple[str, bool]:
+    """Start a background job; returns (job_id, started).
+
+    started=False means a job of the same kind was already running — its id is
+    returned and nothing new is launched.
+    """
     with _JOBS_LOCK:
         # Don't start a second job of the same kind on top of a running one.
         if _job_running(kind):
             for jid, j in JOBS.items():
                 if j["kind"] == kind and j["status"] == "running":
-                    return jid
+                    return jid, False
+        # Prune finished jobs beyond the most recent ~20 so JOBS doesn't grow
+        # forever (dicts keep insertion order, so oldest come first).
+        finished = [jid for jid, j in JOBS.items() if j["status"] != "running"]
+        for jid in finished[:-20]:
+            del JOBS[jid]
         job_id = uuid.uuid4().hex
         JOBS[job_id] = {"status": "running", "log": [], "result": None,
                         "error": None, "kind": kind, "label": label}
 
     def worker() -> None:
         def log(msg) -> None:
-            JOBS[job_id]["log"].append(str(msg))
+            with _JOBS_LOCK:
+                JOBS[job_id]["log"].append(str(msg))
 
         try:
-            JOBS[job_id]["result"] = fn(log)
-            JOBS[job_id]["status"] = "done"
+            result = fn(log)
+            with _JOBS_LOCK:
+                JOBS[job_id]["result"] = result
+                JOBS[job_id]["status"] = "done"
         except PipelineError as e:
-            JOBS[job_id]["error"] = str(e)
-            JOBS[job_id]["status"] = "error"
+            with _JOBS_LOCK:
+                JOBS[job_id]["error"] = str(e)
+                JOBS[job_id]["status"] = "error"
         except Exception as e:  # pragma: no cover - safety net
-            JOBS[job_id]["error"] = f"Unexpected error: {e}"
-            JOBS[job_id]["status"] = "error"
+            with _JOBS_LOCK:
+                JOBS[job_id]["log"].append(traceback.format_exc())
+                JOBS[job_id]["error"] = f"Unexpected error: {e}"
+                JOBS[job_id]["status"] = "error"
 
     threading.Thread(target=worker, daemon=True).start()
-    return job_id
+    return job_id, True
+
+
+def _job_response(job_id: str, started: bool):
+    """JSON for the /api/run/* endpoints — flags when a running job was reused."""
+    return jsonify(job_id=job_id, already_running=not started)
 
 
 # ───────────────────────── profile helpers ─────────────────────────
@@ -189,7 +243,11 @@ def _persist_settings(vals: dict) -> None:
     if "gmail_address" in vals:
         env_updates["GMAIL_ADDRESS"] = (vals.get("gmail_address") or "").strip()
     if "gmail_app_password" in vals:
-        env_updates["GMAIL_APP_PASSWORD"] = (vals.get("gmail_app_password") or "").strip()
+        # /api/state never echoes the secret back, so a blank field means
+        # "keep what's stored" — only overwrite with a non-empty value.
+        pw = (vals.get("gmail_app_password") or "").strip()
+        if pw:
+            env_updates["GMAIL_APP_PASSWORD"] = pw
     if env_updates:
         update_env(env_updates)
 
@@ -204,37 +262,41 @@ def _persist_settings(vals: dict) -> None:
 
 
 def job_status(job_id: str):
-    job = JOBS.get(job_id)
-    if not job:
-        return jsonify(status="unknown"), 404
-    return jsonify(status=job["status"], log=job["log"], error=job["error"], result=job["result"])
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify(status="unknown"), 404
+        return jsonify(status=job["status"], log=list(job["log"]),
+                       error=job["error"], result=job["result"])
 
 
 def jobs_status():
     """Status of recent jobs for the persistent status bar (newest last)."""
     out = []
-    for jid, j in list(JOBS.items())[-6:]:
-        out.append(
-            {
-                "id": jid,
-                "kind": j["kind"],
-                "label": j["label"],
-                "status": j["status"],
-                "last": j["log"][-1] if j["log"] else "",
-                "steps": len(j["log"]),
-                "error": j["error"],
-            }
-        )
+    with _JOBS_LOCK:
+        for jid, j in list(JOBS.items())[-6:]:
+            out.append(
+                {
+                    "id": jid,
+                    "kind": j["kind"],
+                    "label": j["label"],
+                    "status": j["status"],
+                    "last": j["log"][-1] if j["log"] else "",
+                    "steps": len(j["log"]),
+                    "error": j["error"],
+                }
+            )
     # current counts so the Contacts/Drafts pages can offer a non-destructive refresh
     cfg = load_config()
     drafts_dir = resolve(cfg["paths"]["drafts_dir"])
     draft_count = len(list(drafts_dir.glob("*.md"))) if drafts_dir.exists() else 0
     targets_path = resolve(cfg["paths"]["targets"])
     contact_count = 0
-    if targets_path.exists():
-        # csv.reader (not a raw line count): quoted fields can span lines.
-        with targets_path.open("r", encoding="utf-8", newline="") as fh:
-            contact_count = max(0, sum(1 for _ in csv.reader(fh)) - 1)  # minus header
+    with TARGETS_LOCK:
+        if targets_path.exists():
+            # csv.reader (not a raw line count): quoted fields can span lines.
+            with targets_path.open("r", encoding="utf-8", newline="") as fh:
+                contact_count = max(0, sum(1 for _ in csv.reader(fh)) - 1)  # minus header
     return jsonify(jobs=out, draft_count=draft_count, contact_count=contact_count)
 
 
@@ -244,10 +306,11 @@ def jobs_status():
 def _contacts_rows() -> list[dict]:
     cfg = load_config()
     targets_path = resolve(cfg["paths"]["targets"])
-    if not targets_path.exists():
-        return []
-    with targets_path.open("r", encoding="utf-8", newline="") as fh:
-        rows = list(csv.DictReader(fh))
+    with TARGETS_LOCK:
+        if not targets_path.exists():
+            return []
+        with targets_path.open("r", encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
     # Rows scraped before the category column default to research.
     for r in rows:
         if not (r.get("category") or "").strip():
@@ -280,7 +343,8 @@ def api_state():
         name=cfg["sender"]["name"],
         phone=cfg["sender"].get("phone", ""),
         gmail_address=secrets["gmail_address"],
-        gmail_app_password=secrets["gmail_app_password"],
+        gmail_app_password="",  # never sent to the browser
+        gmail_app_password_set=bool(secrets["gmail_app_password"]),
         schools=schools,
         resume_ok=resume_path.exists(),
         resume_name=resume_path.name,
@@ -346,10 +410,9 @@ def api_run_follow_up():
     subject = (data.get("subject") or "").strip()
     if not to:
         return jsonify(error="No recipient specified."), 400
-    return jsonify(
-        job_id=_start_job(lambda log: draft.follow_up(to, name, subject, log=log),
-                          "draft", f"Follow-up to {name or to}")
-    )
+    job_id, started = _start_job(lambda log: draft.follow_up(to, name, subject, log=log),
+                                 "draft", f"Follow-up to {name or to}")
+    return _job_response(job_id, started)
 
 
 @app.route("/api/contacts/set-email", methods=["POST"])
@@ -360,7 +423,7 @@ def api_set_contact_email():
     profile_url = (data.get("profile_url") or "").strip()
     new_email = (data.get("email") or "").strip().lower()
     if targets_path.exists() and profile_url and new_email and "@" in new_email:
-        with _CSV_LOCK:
+        with TARGETS_LOCK:
             with targets_path.open("r", encoding="utf-8", newline="") as fh:
                 reader = csv.DictReader(fh)
                 fieldnames = reader.fieldnames or scrape.CSV_FIELDS
@@ -389,7 +452,7 @@ def api_delete_contact():
                 return (r.get("email") or "").strip().lower() != email
             return (r.get("profile_url") or "").strip() != profile_url
 
-        with _CSV_LOCK:
+        with TARGETS_LOCK:
             with targets_path.open("r", encoding="utf-8", newline="") as fh:
                 reader = csv.DictReader(fh)
                 fieldnames = reader.fieldnames or scrape.CSV_FIELDS
@@ -462,8 +525,9 @@ def api_delete_draft():
 @app.route("/api/reset/contacts", methods=["POST"])
 def api_reset_contacts():
     p = resolve(load_config()["paths"]["targets"])
-    if p.exists():
-        p.unlink()
+    with TARGETS_LOCK:
+        if p.exists():
+            p.unlink()
     return jsonify(ok=True)
 
 
@@ -489,9 +553,10 @@ def _category_kind(data: dict) -> tuple[str, str]:
 def api_run_scrape():
     data = request.get_json(silent=True) or {}
     category, _ = _category_kind(data)
-    return jsonify(
-        job_id=_start_job(lambda log: scrape.run(log=log, category=category), "scrape", "Scraping")
+    job_id, started = _start_job(
+        lambda log: scrape.run(log=log, category=category), "scrape", "Scraping"
     )
+    return _job_response(job_id, started)
 
 
 @app.route("/api/run/discover", methods=["POST"])
@@ -538,17 +603,57 @@ def api_run_discover():
         return {"added": added, "found": len(rows)}
 
     label = "Finding jobs" if category == "industry" else "Finding researchers"
-    return jsonify(job_id=_start_job(_fn, "discover", f"{label}: {query}"))
+    job_id, started = _start_job(_fn, "discover", f"{label}: {query}")
+    return _job_response(job_id, started)
 
 
 @app.route("/api/run/draft", methods=["POST"])
 def api_run_draft():
     def _draft_fn(log):
-        return draft.run(
-            log=log,
-            keep_going=lambda: _job_running("scrape") or _job_running("discover"),
-        )
-    return jsonify(job_id=_start_job(_draft_fn, "draft", "Generating drafts"))
+        import time as _time
+
+        # Drive the drafter one contact at a time so a contact whose draft
+        # fails is skipped for the rest of this run instead of being retried
+        # (and re-billed) on every cycle while the scraper keeps working.
+        failed: set[str] = set()
+        made = 0
+        while True:
+            cfg = load_config()
+            drafts_dir = resolve(cfg["paths"]["drafts_dir"])
+            pending = []
+            for r in _contacts_rows():
+                slug = draft.slug_for(
+                    r.get("email", ""), r.get("name", ""),
+                    r.get("profile_url", ""), r.get("source_url", ""),
+                )
+                if slug not in failed and not (drafts_dir / f"{slug}.md").exists():
+                    pending.append((slug, r))
+            if not pending:
+                if _job_running("scrape") or _job_running("discover"):
+                    log("Waiting for scraper to find more contacts…")
+                    _time.sleep(15)
+                    continue
+                if made == 0 and not resolve(cfg["paths"]["targets"]).exists():
+                    raise PipelineError(
+                        "No contacts yet. Scrape some schools on the Setup page first."
+                    )
+                break
+            for slug, r in pending:
+                ident = (r.get("email") or r.get("profile_url") or r.get("name") or "").strip()
+                if not ident:
+                    failed.add(slug)
+                    continue
+                draft.run(log=log, only=ident, limit=1)
+                if (drafts_dir / f"{slug}.md").exists():
+                    made += 1
+                else:
+                    log(f"  [{r.get('name') or ident}] failed — skipping for the rest of this run.")
+                    failed.add(slug)
+        log(f"Done. Wrote {made} new draft(s).")
+        return {"made": made}
+
+    job_id, started = _start_job(_draft_fn, "draft", "Generating drafts")
+    return _job_response(job_id, started)
 
 
 @app.route("/api/run/draft-one", methods=["POST"])
@@ -558,22 +663,20 @@ def api_run_draft_one():
     if not ident:
         return jsonify(error="No contact specified."), 400
     label = data.get("name") or ident
-    return jsonify(
-        job_id=_start_job(lambda log: draft.run(log=log, only=ident, limit=1),
-                          "draft", f"Drafting {label}")
-    )
+    job_id, started = _start_job(lambda log: draft.run(log=log, only=ident, limit=1),
+                                 "draft", f"Drafting {label}")
+    return _job_response(job_id, started)
 
 
 @app.route("/api/run/send", methods=["POST"])
 def api_run_send():
     data = request.get_json(silent=True) or {}
     html_map = data.get("html_map") or {}
-    return jsonify(
-        job_id=_start_job(
-            lambda log: send.send_approved(do_send=True, log=log, html_map=html_map),
-            "send", "Sending approved",
-        )
+    job_id, started = _start_job(
+        lambda log: send.send_approved(do_send=True, log=log, html_map=html_map),
+        "send", "Sending approved",
     )
+    return _job_response(job_id, started)
 
 
 @app.route("/api/job/<job_id>")
