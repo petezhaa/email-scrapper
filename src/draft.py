@@ -628,7 +628,9 @@ def run(limit: int | None = None, log=print, keep_going=None,
 
     if not targets_path.exists():
         raise PipelineError("No contacts yet. Scrape some schools on the Setup page first.")
-    profile = profile_path.read_text(encoding="utf-8")
+    # profile.md is gitignored (personal data) — a fresh clone won't have it;
+    # the blank-grounding guard below gives the actionable message.
+    profile = profile_path.read_text(encoding="utf-8") if profile_path.exists() else ""
     sender_name = cfg["sender"]["name"]
     if not sender_name.strip():
         raise PipelineError(
@@ -811,7 +813,8 @@ def follow_up(to: str, name: str, subject: str, log=print) -> dict:
     pending draft (slug + '_followup') for review."""
     cfg = load_config()
     writer_client = build_writer_client()
-    profile = resolve(cfg["paths"]["profile"]).read_text(encoding="utf-8")
+    _profile_path = resolve(cfg["paths"]["profile"])
+    profile = _profile_path.read_text(encoding="utf-8") if _profile_path.exists() else ""
     sender_name = cfg["sender"]["name"]
     if not sender_name.strip():
         raise PipelineError("Sender name is not set. Fill in your name on the Setup page and save.")

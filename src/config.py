@@ -1,6 +1,7 @@
 """Loads configuration (config.yaml) and secrets (.env) from the project root."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -36,12 +37,38 @@ class PipelineError(RuntimeError):
 
 
 def load_config() -> dict:
-    """Read config.yaml from the project root."""
+    """Read config.yaml from the project root.
+
+    Personal sender fields (name/phone) live in data/profile_fields.json —
+    gitignored — and are overlaid here so the committed config.yaml never
+    carries them. save_config() diverts them back there symmetrically.
+    """
     cfg_path = ROOT / "config.yaml"
     if not cfg_path.exists():
         raise ConfigError(f"Missing config file: {cfg_path}")
     with cfg_path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    fields = _read_profile_fields()
+    sender = cfg.setdefault("sender", {})
+    if fields.get("sender_name"):
+        sender["name"] = fields["sender_name"]
+    if fields.get("sender_phone"):
+        sender["phone"] = fields["sender_phone"]
+    return cfg
+
+
+def _profile_fields_path() -> Path:
+    return ROOT / "data" / "profile_fields.json"
+
+
+def _read_profile_fields() -> dict:
+    path = _profile_fields_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return {}
+    return {}
 
 
 def _read_env_file() -> dict:
@@ -188,9 +215,29 @@ def resolve(path_str: str) -> Path:
 
 
 def save_config(cfg: dict) -> None:
-    """Write config.yaml back to the project root (used by the web UI)."""
+    """Write config.yaml back to the project root (used by the web UI).
+
+    Sender name/phone are personal, and config.yaml is committed — so they
+    are diverted to data/profile_fields.json (gitignored) and blanked in the
+    yaml. load_config() overlays them back, so cfg["sender"] readers
+    (draft/send) are unaffected.
+    """
+    out = dict(cfg)
+    sender = dict(out.get("sender") or {})
+    name = (sender.get("name") or "").strip()
+    phone = (sender.get("phone") or "").strip()
+    fields = _read_profile_fields()
+    if name != (fields.get("sender_name") or "") or phone != (fields.get("sender_phone") or ""):
+        fields["sender_name"] = name
+        fields["sender_phone"] = phone
+        path = _profile_fields_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(fields, indent=2), encoding="utf-8")
+    sender["name"] = ""
+    sender["phone"] = ""
+    out["sender"] = sender
     with (ROOT / "config.yaml").open("w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+        yaml.safe_dump(out, f, sort_keys=False, allow_unicode=True)
 
 
 def update_env(updates: dict) -> None:

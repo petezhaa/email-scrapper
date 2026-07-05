@@ -5,6 +5,7 @@
 # and web/src/app/sent are source code, not data)
 data/targets.csv
 data/profile_fields.json
+data/profile.md
 /drafts/
 /sent/
 resume/*.pdf
